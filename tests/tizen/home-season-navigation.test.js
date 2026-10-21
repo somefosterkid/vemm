@@ -80,6 +80,7 @@ async function run() {
         createVideoPlayQueue: forbiddenWrite
     };
     var api = {
+        ratingBadges: function () { return []; },
         createAuthClient: function () { return {
             startAuthorization: function () { return Promise.resolve({ code: "TEST", id: 1 }); },
             pollAuthorization: function () { return Promise.resolve({ status: "linked", token: "synthetic-account-token" }); }
@@ -142,12 +143,6 @@ async function run() {
     click("Get a new code");
     await settle();
     click("Synthetic Guest");
-    await settle();
-    var serverButton = screen.querySelectorAll().find(function (node) {
-        return /^Synthetic \(owned\)/.test(node.textContent);
-    });
-    assert(serverButton, "Synthetic server selection is available");
-    serverButton.events.click();
     await settle();
 
     var homeSeason = screen.querySelectorAll().find(function (node) {

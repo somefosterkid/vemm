@@ -81,7 +81,7 @@ async function run() {
         });
         await settle();
     }
-    function settings() { click(/^Account$/); click(/^Settings$/); }
+    function settings() { click(/^Account$/); click(/^Settings$/); click(/^Graphics$/); }
     function saved() { return JSON.parse(data["vemm-tizen-preferences"]); }
     try {
         assert(!find(/^New graphics enhancements:/), "Enhancements are not offered before connection/login");
@@ -97,7 +97,7 @@ async function run() {
         click(/^New graphics enhancements:/);
         assert.strictEqual(saved().enhancedGraphics, true);
         assert.strictEqual(state.created, 0, "Enable is lazy; Settings contains no artwork context");
-        click(/^Back$/);
+        click(/^Back$/); click(/^Back$/);
         await decode();
         assert.strictEqual(state.created, 1);
         assert.strictEqual(state.enabled[0], true);
@@ -111,7 +111,7 @@ async function run() {
         assert.strictEqual(saved().enhancedGraphics, false);
         assert.strictEqual(state.enabled[state.enabled.length - 1], false);
         var rendered = state.presented.length;
-        click(/^Back$/);
+        click(/^Back$/); click(/^Back$/);
         await decode();
         assert.strictEqual(state.presented.length, rendered, "Off preserves the original renderer");
         settings();
@@ -123,7 +123,7 @@ async function run() {
         failStorage = false;
         click(/^New graphics enhancements:/);
         state.fail = true;
-        click(/^Back$/);
+        click(/^Back$/); click(/^Back$/);
         await decode();
         assert(window.document.getElementById("status").textContent.includes("Existing graphics remain active"));
         assert(window.document.querySelector('img.home-hero-art[data-artwork-state="loaded"]'),

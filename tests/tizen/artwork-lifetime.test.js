@@ -35,7 +35,7 @@ async function run() {
                 var titles = [];
                 for (var i = 0; i < 12; i += 1) {
                     titles.push({ ratingKey: String(h * 12 + i), type: "movie",
-                        title: "Artwork " + h + "-" + i, thumb: "/library/metadata/" + i + "/thumb" });
+                        title: "Artwork " + h + "-" + i, thumb: "/library/metadata/" + (h * 12 + i) + "/thumb" });
                 }
                 hubs.push({ title: "Shelf " + h, Metadata: titles });
             }
@@ -56,9 +56,16 @@ async function run() {
         for (var i = 0; i < 40; i += 1) { await Promise.resolve(); }
         await new Promise(function (resolve) { setImmediate(resolve); });
     }
+    // Home draws its later shelves after the first paint.
+    async function showAllShelves() {
+        await new Promise(function (resolve) { setTimeout(resolve, 20); });
+        var all = window.document.querySelectorAll(".media-card");
+        if (all.length) { all[all.length - 1].dispatchEvent(new window.Event("focus")); }
+    }
     try {
         await settle();
-        assert.strictEqual(created.length, 3, "Image concurrency must include decode, not just download");
+        await showAllShelves();
+        assert.strictEqual(created.length, 6, "Image concurrency must include decode, not just download");
         assert.deepStrictEqual(revoked, [], "An undecoded displayed URL must not be evicted");
         var failedImage = Array.from(window.document.querySelectorAll("img")).find(function (image) {
             return typeof image.onerror === "function";
@@ -80,10 +87,11 @@ async function run() {
                 image.onload();
             });
             await settle();
-            assert(created.length - revoked.length <= 3, "Only active decodes may retain Blob URLs");
+            assert(created.length - revoked.length <= 3 + 150, "Only active decodes and the bounded cache may retain Blob URLs");
         }
         assert(created.length > 60, "Exercise more images than the old eviction limit");
-        assert.strictEqual(revoked.length, created.length);
+        assert.strictEqual(created.length - revoked.length, created.length - 1,
+            "Finished artwork stays cached; only the undecodable image is released");
         assert(window.document.querySelector('img[data-artwork-state="loaded"]'),
             "Successful images expose decode completion without leaking their URL");
         assert(revoked.every(function (url) { return decoded.indexOf(url) !== -1; }));
@@ -95,11 +103,11 @@ async function run() {
         click("Account");
         click("Refresh");
         await settle();
-        assert.strictEqual(created.length - revoked.length, 3);
+        assert(created.length - revoked.length <= 150 + 3);
         click("Account");
         click("Settings");
-        assert.strictEqual(revoked.length, created.length,
-            "Leaving a view must cancel its active decodes and release every URL");
+        assert(created.length - revoked.length <= 150,
+            "Leaving a view must cancel its active decodes and keep only the bounded cache");
         console.log("Tizen artwork decode concurrency and Blob URL lifetime: passed");
     } finally { dom.window.close(); }
 }

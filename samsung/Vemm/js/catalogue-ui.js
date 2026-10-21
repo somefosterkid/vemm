@@ -85,35 +85,49 @@
                 });
             }
             function openSearch(query, run) {
-                var generation = options.view("Plex catalogue", function () { openSearch(query, run); }, "catalogue-search");
-                var input = options.element("input", "remote-input");
-                input.type = "search"; input.maxLength = 200; input.value = query || "";
-                input.setAttribute("aria-label", options.translate("Search Plex catalogue"));
-                options.screen.appendChild(input);
+                var generation = options.view("Discover", function () { openSearch(query, run); }, "catalogue-search");
+                var searchUi = root.VemmSearchUi;
+                var timer = null;
+                var latest = 0;
+                var keyboard = searchUi.keyboard({
+                    element: options.element, translate: options.translate, label: "Search Discover",
+                    hint: "Type a title to search",
+                    onChange: function () {
+                        if (timer !== null) { clearTimeout(timer); }
+                        timer = setTimeout(function () { timer = null; if (options.screen.contains(keyboard.node)) { search(); } }, searchUi.DEBOUNCE);
+                    }
+                });
+                options.screen.appendChild(keyboard.node);
+                var results = options.group(options.screen, "", "catalogue-results");
+                keyboard.attach(results);
+                searchUi.link(keyboard, results);
                 function search() {
-                    if (!input.value.trim()) { options.status("Enter a title to search.", true); input.focus(); return; }
-                    openSearch(input.value.trim(), true);
-                }
-                options.button(options.screen, "Search", search);
-                input.addEventListener("keydown", function (event) {
-                    if (event.keyCode === 13) { event.preventDefault(); search(); }
-                });
-                options.focus();
-                if (!run) { options.status("Search Plex metadata. Licensed catalogue streaming is not enabled."); return; }
-                Promise.resolve().then(function () { return account().searchCatalogue(query); }).then(function (items) {
-                    if (generation !== options.generation()) { return; }
-                    var list = options.group(options.screen, "", "catalogue-grid");
-                    if (!items.length) { list.appendChild(options.element("p", "empty-state", options.translate("No matching media found."))); }
-                    items.forEach(function (item) {
-                        options.tile(list, item, function () {
-                            options.visit(function () { openItem(item); });
-                        }, options.artwork());
+                    if (timer !== null) { clearTimeout(timer); timer = null; }
+                    var text = keyboard.value().trim();
+                    var mine = ++latest;
+                    results.innerHTML = "";
+                    if (!text) { options.status("Enter a title to search."); return; }
+                    options.status("Searching...");
+                    Promise.resolve().then(function () { return account().searchCatalogue(text); }).then(function (items) {
+                        if (generation !== options.generation() || mine !== latest) { return; }
+                        var list = options.group(results, "", "catalogue-grid");
+                        if (!items.length) { list.appendChild(options.element("p", "empty-state", options.translate("No matching media found."))); }
+                        items.forEach(function (item) {
+                            options.tile(list, item, function () {
+                                options.visit(function () { openItem(item); });
+                            }, options.artwork());
+                        });
+                        options.status(items.length ? "Showing up to 30 catalogue results. Refine the query for more." : "No matching media found.");
+                    }).catch(function (error) {
+                        if (generation === options.generation() && mine === latest) { options.status(root.VemmI18n.error(error), true); }
                     });
-                    options.status(items.length ? "Showing up to 30 catalogue results. Refine the query for more." : "No matching media found.");
-                    options.focus();
-                }).catch(function (error) {
-                    if (generation === options.generation()) { options.status(root.VemmI18n.error(error), true); }
-                });
+                }
+                var restoring = options.restoring();
+                options.focus();
+                if (!restoring) { keyboard.focus(); }
+                if (query) { keyboard.set(query); }
+                if (!run) { options.status("Search Plex metadata. Licensed catalogue streaming is not enabled."); return; }
+                search();
             }
             return { watchlist: openWatchlist, item: openItem, search: openSearch };
         }

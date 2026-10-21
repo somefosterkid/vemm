@@ -24,6 +24,7 @@ Object.defineProperty(Node.prototype, "firstChild", { get: function () { return 
 Node.prototype.addEventListener = function (name, callback) { this.events[name] = callback; };
 Node.prototype.setAttribute = function () {};
 Node.prototype.focus = function () { focused = this; };
+Node.prototype.querySelector = function () { return null; };
 var focused = null;
 Node.prototype.querySelectorAll = function () {
     var result = [];
@@ -61,6 +62,7 @@ async function run() {
         getChildren: function () { return Promise.resolve({ totalSize: 1, Metadata: [season] }); }
     };
     var api = {
+        ratingBadges: function () { return []; },
         createAuthClient: function () { return {
             startAuthorization: function () { return Promise.resolve({ code: "TEST", id: 1 }); },
             pollAuthorization: function () { return Promise.resolve({ status: "linked", token: "synthetic-account-token" }); }
@@ -96,10 +98,6 @@ async function run() {
     click("Get a new code");
     await settle();
     click("Synthetic Guest");
-    await settle();
-    var serverButton = screen.querySelectorAll().find(function (node) { return /^Synthetic \(owned\)/.test(node.textContent); });
-    serverButton.focus();
-    serverButton.events.click();
     await settle();
     var card = screen.querySelectorAll().find(function (node) { return node.className === "media-card"; });
     card.focus();

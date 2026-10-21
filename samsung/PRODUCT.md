@@ -34,8 +34,9 @@ Licensed catalogue streaming and verified live tuning remain acceptance gaps.
 
 Vemm (`/vem/`) is the working product brand and **Your media. At its best.** is
 the working tagline. Keep the existing cinematic, remote-first layout as the
-product reference. Blue Calm uses quiet navy surfaces and mist/pale-blue
-focus, selection and progress cues rather than mass-redesigning every screen.
+product reference. The default Blue (Blue Calm) theme uses quiet navy surfaces and pale-sky focus; Grey,
+Black and Pure black (OLED) themes and an accent choice are colour tokens over the same screens, never a
+redesign of them.
 Keep controls text-first and avoid decorative iconography; retain compact
 transport glyphs only where visible text would harm playback operation.
 Do not borrow Plex, Samsung, Microsoft or upstream PlxNative branding or imply

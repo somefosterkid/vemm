@@ -9,13 +9,18 @@ var vm = require("vm");
 function Node(tag, text) {
     this.tag = tag;
     this.tagName = String(tag).toUpperCase();
-    this.textContent = text || "";
+    this.text = text || "";
     this.children = [];
     this.events = {};
     this.attributes = {};
     this.parentNode = null;
     this.value = "";
 }
+// A control's text includes its children (the profile name sits in a span).
+Object.defineProperty(Node.prototype, "textContent", {
+    get: function () { return this.text + this.children.map(function (child) { return child.textContent; }).join(""); },
+    set: function (value) { this.text = value; }
+});
 Node.prototype.appendChild = function (child) { child.parentNode = this; this.children.push(child); return child; };
 Node.prototype.removeChild = function (child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null; };
 Node.prototype.replaceChild = function (next, previous) {
@@ -70,7 +75,7 @@ var episode = { ratingKey: "50", type: "episode", title: "Synthetic Episode", vi
     grandparentRatingKey: "30", parentRatingKey: "40" };
 var movie = { ratingKey: "7", type: "movie", title: "Synthetic Movie", guid: "plex://movie/5d7768295af944001f1f7477" };
 
-function boot(storage) {
+function boot(storage, extraHubs) {
     var screen = new Node("main");
     var status = new Node("p");
     var listeners = {};
@@ -95,7 +100,7 @@ function boot(storage) {
                     { title: "Recent Shows", hubIdentifier: "home.television.recent", librarySectionID: 2,
                         Metadata: [{ ratingKey: "60", type: "show", title: "Shows Shelf Item" }] },
                     { title: "Recent Movies", hubIdentifier: "home.movies.recent", librarySectionID: 1, Metadata: [movie] }
-                ]);
+                ].concat(extraHubs || []));
             },
             getMetadata: function (id) {
                 record.opened.push(name + ":" + id);
@@ -113,6 +118,7 @@ function boot(storage) {
     var sections = [{ key: "1", type: "movie", title: "Movies" }, { key: "2", type: "show", title: "Shows" }];
     var clients = { a: server("Alpha", sections), b: server("Beta", [{ key: "5", type: "movie", title: "Films" }]) };
     var api = {
+        ratingBadges: function () { return []; },
         createAuthClient: function () { return {
             startAuthorization: function () { return Promise.resolve({ code: "TEST", id: 1 }); },
             pollAuthorization: function () { return Promise.resolve({ status: "linked", token: "synthetic-account-token" }); }
@@ -170,6 +176,7 @@ function boot(storage) {
         assert(serverButton, "Missing server control " + serverLabel);
         serverButton.events.click();
         await settle();
+        fire(0); // Home draws its later shelves after the first paint
     }
     return { screen: screen, status: status, find: find, click: click, cards: cards, key: key, fire: fire,
         settle: settle, signIn: signIn, record: record, document: document, window: window };
@@ -256,7 +263,126 @@ async function otherServers() {
     assert.strictEqual(app.status.textContent, "Other copies of this title. Each copy keeps its own resume position.");
 }
 
+async function restrictedProfileHubs() {
+    var storage = memoryStorage({});
+    var app = boot(storage, [
+        { title: "Recently added in Documentaries", hubIdentifier: "home.documentaries.recent", librarySectionID: "9",
+            Metadata: [{ ratingKey: "90", type: "show", title: "Documentary Item" }] },
+        { title: "Empty Row", hubIdentifier: "home.empty", librarySectionID: 1, Metadata: [] },
+        { title: "No Metadata Row", hubIdentifier: "home.none" }
+    ]);
+    await app.signIn("Alpha (owned)");
+    app.click("Skip for now");
+    await app.settle();
+    app.fire(0);
+    var titles = texts(app.screen);
+    assert(titles.indexOf("Recently added in Documentaries") === -1, "A hub of a library the profile cannot see is hidden");
+    assert(titles.indexOf("Empty Row") === -1 && titles.indexOf("No Metadata Row") === -1, "Empty hubs are hidden");
+    assert(titles.indexOf("Recent Movies") !== -1 && titles.indexOf("Continue Watching") !== -1, "Normal hubs stay");
+    assert(!app.cards().some(function (node) { return node.vemmCard.item.ratingKey === "90"; }),
+        "The inaccessible hub feeds neither a row nor the hero");
+}
+
+function serverApi(app, servers) {
+    var createAccountClient = app.window.PlexApi.createAccountClient;
+    app.window.PlexApi.createAccountClient = function () {
+        var client = createAccountClient.apply(this, arguments);
+        client.getServers = function () { return Promise.resolve(servers); };
+        return client;
+    };
+}
+var ALPHA = { id: "machine-a", name: "Alpha", owned: true, token: "t-a", connections: [{ uri: "https://a.invalid" }] };
+var BETA = { id: "machine-b", name: "Beta", owned: false, token: "t-b", connections: [{ uri: "https://b.invalid" }] };
+var LAST = "vemm-tizen-last-server-synthetic-profile";
+
+async function automaticServer() {
+    var storage = memoryStorage({});
+    storage.setItem(FAVORITES, JSON.stringify({ "machine-a": ["1", "2"], "machine-b": ["5"] }));
+    // One available server connects without a list; an unavailable one does not count.
+    var app = boot(storage);
+    serverApi(app, [ALPHA, { id: "off", name: "Off", token: "", connections: [] }]);
+    app.click("Get a new code");
+    await app.settle();
+    app.click("Synthetic Guest");
+    await app.settle();
+    assert.deepStrictEqual(app.record.selected, ["machine-a"], "A lone available server connects automatically");
+    assert(app.find("Movies"), "Home is shown");
+    assert.strictEqual(storage.getItem(LAST), "machine-a", "A successful connection is remembered per profile");
+
+    // Two servers: the list is shown first, a manual pick is remembered, and the next sign-in skips the list.
+    app = boot(storage);
+    storage.removeItem(LAST);
+    await app.signIn("Beta (shared)");
+    assert.strictEqual(storage.getItem(LAST), "machine-b");
+    app.click("Change server");
+    await app.settle();
+    assert(app.find("Alpha (owned)") && app.find("Beta (shared)"), "Change server shows the list instead of reconnecting");
+    assert.deepStrictEqual(app.record.selected, ["machine-b"]);
+    app = boot(storage);
+    app.click("Get a new code");
+    await app.settle();
+    app.click("Synthetic Guest");
+    await app.settle();
+    assert.deepStrictEqual(app.record.selected, ["machine-b"], "The remembered server connects automatically");
+    assert(app.find("Films"), "Home of the remembered server is shown");
+
+    // A remembered server that is no longer listed falls back to the list.
+    storage.setItem(LAST, "gone");
+    app = boot(storage);
+    app.click("Get a new code");
+    await app.settle();
+    app.click("Synthetic Guest");
+    await app.settle();
+    assert(app.find("Alpha (owned)") && app.record.selected.length === 0, "An unknown remembered server shows the list");
+
+    // A failed automatic connection shows the list with the error.
+    storage.setItem(LAST, "machine-a");
+    app = boot(storage);
+    app.window.PlexApi.selectServer = function () { return Promise.reject(new Error("Synthetic connection failure")); };
+    app.click("Get a new code");
+    await app.settle();
+    app.click("Synthetic Guest");
+    await app.settle();
+    assert(app.find("Beta (shared)"), "A failed automatic connection offers the server list");
+    assert(texts(app.screen).some(function (text) { return text.indexOf("Synthetic connection failure") !== -1; }),
+        "The failure is shown");
+}
+
+async function automaticConnectionIsSilent() {
+    var storage = memoryStorage({});
+    storage.setItem(FAVORITES, JSON.stringify({ "machine-a": ["1", "2"] }));
+    var app = boot(storage);
+    serverApi(app, [ALPHA]);
+    var seen = [];
+    var append = Node.prototype.appendChild;
+    Node.prototype.appendChild = function (child) { seen.push(child.textContent); return append.call(this, child); };
+    var release;
+    app.window.PlexApi.selectServer = function () {
+        var home = { cancelRequests: function () {}, getSections: function () { return Promise.resolve([]); },
+            getHomeHubs: function () { return Promise.resolve([]); } };
+        return new Promise(function (resolve) { release = function () { resolve({ relay: false, client: home }); }; });
+    };
+    try {
+        app.click("Get a new code");
+        await app.settle();
+        app.click("Synthetic Guest");
+        await app.settle();
+        assert(release, "The lone server is being connected");
+        assert(!app.find("Cancel connection") && !app.find("Alpha (owned)"), "No connecting controls while connecting automatically");
+        assert(!/Discovering/.test(app.status.textContent), "No discovery status: " + app.status.textContent);
+        release();
+        await app.settle();
+        assert(app.find("Home"), "Home is shown");
+        ["Choose a server", "Cancel connection", "Alpha (owned)"].forEach(function (text) {
+            assert.strictEqual(seen.indexOf(text), -1, "The server page never renders: " + text);
+        });
+    } finally { Node.prototype.appendChild = append; }
+}
+
 async function run() {
+    await restrictedProfileHubs();
+    await automaticServer();
+    await automaticConnectionIsSilent();
     await onboardingSkip();
     await onboardingSave();
     await holdMenuAndShortPress();

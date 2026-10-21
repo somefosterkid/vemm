@@ -23,8 +23,10 @@ unique temporary directory and removes only its owned output.
 Catalogs are under `samsung/locales/`; additions/overrides are
 `samsung/strings.json`. After edits run
 `node tools/tizen/build-locales.js --write`.
+Colours in `samsung/Vemm/css/style.css` are theme tokens (`samsung/Vemm/js/theme.js`); after
+changing one run `node tools/tizen/build-theme.js --write`.
 The original icon is reproducible with `python3 tools/tizen/build-icon.py --write`.
-Both generated outputs have freshness checks.
+The generated outputs have freshness checks.
 
 Commit and confirm a clean tree before the final gates. Afterward confirm the
 tree remains clean; bind evidence to that exact SHA. An unsigned source build

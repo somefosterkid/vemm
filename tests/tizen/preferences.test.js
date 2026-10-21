@@ -9,11 +9,11 @@ var storage = {
 };
 assert.deepStrictEqual(prefs.load(storage), { quality: "original", language: "en", nextEpisode: "countdown",
     continueAction: "details", skipInterval: 10, subtitleSize: "medium", subtitlePosition: "low",
-    subtitleColor: "white", subtitleBackground: "off", subtitleDelayMs: 0, directPlay: "auto", enhancedGraphics: false });
+    subtitleColor: "white", subtitleBackground: "off", subtitleDelayMs: 0, directPlay: "auto", enhancedGraphics: false, saveHomeArtwork: false, artworkLimitMb: 10, saveLibraryArtwork: false, preloadArtwork: true, autoAdvanceFeatures: true, minBuffer: 1, skipIntro: "button", skipCredits: "button", theme: "blue", accent: "theme", ratingSources: ["rt_critic", "rt_audience", "imdb", "tmdb"] });
 value = JSON.stringify({ quality: "720", language: "en", autoNext: false });
 assert.deepStrictEqual(prefs.load(storage), { quality: "720", language: "en", nextEpisode: "off",
     continueAction: "details", skipInterval: 10, subtitleSize: "medium", subtitlePosition: "low",
-    subtitleColor: "white", subtitleBackground: "off", subtitleDelayMs: 0, directPlay: "auto", enhancedGraphics: false }, "Preferences from earlier app versions receive safe defaults; auto-play off stays off");
+    subtitleColor: "white", subtitleBackground: "off", subtitleDelayMs: 0, directPlay: "auto", enhancedGraphics: false, saveHomeArtwork: false, artworkLimitMb: 10, saveLibraryArtwork: false, preloadArtwork: true, autoAdvanceFeatures: true, minBuffer: 1, skipIntro: "button", skipCredits: "button", theme: "blue", accent: "theme", ratingSources: ["rt_critic", "rt_audience", "imdb", "tmdb"] }, "Preferences from earlier app versions receive safe defaults; auto-play off stays off");
 value = JSON.stringify({ quality: "720", language: "en", autoNext: true });
 assert.strictEqual(prefs.load(storage).nextEpisode, "countdown", "Auto-play on becomes the LG credits countdown");
 assert.strictEqual("autoNext" in prefs.load(storage), false);
@@ -65,11 +65,88 @@ prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", e
 assert.strictEqual(prefs.load(storage).enhancedGraphics, true);
 prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", enhancedGraphics: false });
 assert.strictEqual(prefs.load(storage).enhancedGraphics, false);
+prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", saveHomeArtwork: true });
+assert.strictEqual(prefs.load(storage).saveHomeArtwork, true);
 [1, "true", null, {}].forEach(function (invalid) {
     assert.throws(function () {
         prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", enhancedGraphics: invalid });
     }, /invalid/);
 });
+prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", minBuffer: 15 });
+assert.strictEqual(prefs.load(storage).minBuffer, 15, "The minimum buffer is a saved choice");
+[0.5, 1, 2, 4, 8, 15].forEach(function (seconds) {
+    prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", minBuffer: seconds });
+    assert.strictEqual(prefs.load(storage).minBuffer, seconds);
+});
+assert.deepStrictEqual(prefs.bufferSizes, [0.5, 1, 2, 4, 8, 15], "Shortest first; 0.1 s is no longer offered");
+value = JSON.stringify({ quality: "1080h", language: "en", nextEpisode: "countdown", minBuffer: 0.1 });
+assert.strictEqual(prefs.load(storage).minBuffer, 0.5, "A saved 0.1 s (slower on the TV) loads as 0.5 s, not as invalid preferences");
+[3, 30, "auto", "8", null, 0, 0.2].forEach(function (invalid) {
+    assert.throws(function () {
+        prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", minBuffer: invalid });
+    }, /invalid/);
+});
+// Earlier buffer settings ("Buffer before playing" bufferSeconds, then "Buffer: Auto" buffer) no longer apply.
+value = JSON.stringify({ quality: "1080h", language: "en", nextEpisode: "countdown", bufferSeconds: 30 });
+assert.strictEqual(prefs.load(storage).minBuffer, 1);
+assert.strictEqual("bufferSeconds" in prefs.load(storage), false);
+value = JSON.stringify({ quality: "1080h", language: "en", nextEpisode: "countdown", buffer: "auto" });
+assert.strictEqual(prefs.load(storage).minBuffer, 1, "A profile saved with Buffer: Auto loads with the 1 s minimum");
+assert.strictEqual("buffer" in prefs.load(storage), false);
+["button", "auto", "off"].forEach(function (mode) {
+    prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", skipIntro: mode, skipCredits: mode });
+    assert.strictEqual(prefs.load(storage).skipIntro, mode);
+    assert.strictEqual(prefs.load(storage).skipCredits, mode);
+});
+["on", true, null].forEach(function (invalid) {
+    assert.throws(function () {
+        prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", skipIntro: invalid });
+    }, /invalid/);
+    assert.throws(function () {
+        prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", skipCredits: invalid });
+    }, /invalid/);
+});
 prefs.reset(storage);
 assert.strictEqual(value, null);
+["2160", "1440", "1080_16", "1080_12", "1080_10"].forEach(function (quality) {
+    prefs.save(storage, { quality: quality, language: "en", nextEpisode: "off" });
+    assert.strictEqual(prefs.load(storage).quality, quality, quality + " is a saved choice");
+    assert(prefs.qualities.indexOf(quality) !== -1);
+});
+// Artwork storage options: older saved preferences load with the defaults; bad values are refused.
+value = JSON.stringify({ quality: "original", language: "en", saveHomeArtwork: true });
+assert.strictEqual(prefs.load(storage).artworkLimitMb, 10);
+assert.strictEqual(prefs.load(storage).saveLibraryArtwork, false);
+prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", artworkLimitMb: 150, saveLibraryArtwork: true });
+assert.strictEqual(prefs.load(storage).artworkLimitMb, 150);
+assert.strictEqual(prefs.load(storage).saveLibraryArtwork, true);
+[0, 5, 11, "25", null].forEach(function (invalid) {
+    assert.throws(function () { prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", artworkLimitMb: invalid }); }, /invalid/);
+});
+assert.throws(function () { prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", saveLibraryArtwork: "on" }); }, /invalid/);
+assert.throws(function () { prefs.save(storage, { quality: "original", language: "en", nextEpisode: "off", preloadArtwork: "on" }); }, /invalid/);
+assert.deepStrictEqual(prefs.artworkLimitChoices(156 * 1024 * 1024, 10), [10, 25, 50, 100, 150]);
+assert.deepStrictEqual(prefs.artworkLimitChoices(60 * 1024 * 1024, 10), [10, 25, 50], "Choices above the quota are hidden");
+assert.deepStrictEqual(prefs.artworkLimitChoices(60 * 1024 * 1024, 150), [10, 25, 50, 150], "The current value stays even above the quota");
+assert.deepStrictEqual(prefs.artworkLimitChoices(null, 10), [10, 25, 50, 100, 150], "An unknown quota offers everything");
+assert.deepStrictEqual(prefs.artworkLimitChoices(5 * 1024 * 1024, 10), [10], "The current value stays even when the quota is tiny");
+value = JSON.stringify({ quality: "720", language: "en", nextEpisode: "countdown" });
+assert.strictEqual(prefs.load(storage).autoAdvanceFeatures, true, "Preferences saved before the featured auto-advance setting load as On");
+prefs.save(storage, { quality: "720", language: "en", nextEpisode: "countdown", autoAdvanceFeatures: false });
+assert.strictEqual(prefs.load(storage).autoAdvanceFeatures, false, "Auto-advance Off is persisted");
+assert.throws(function () {
+    prefs.save(storage, { quality: "720", language: "en", nextEpisode: "countdown", autoAdvanceFeatures: "no" });
+}, /invalid/);
+prefs.save(storage, { quality: "720", language: "en", nextEpisode: "countdown", ratingSources: ["imdb"] });
+assert.deepStrictEqual(prefs.load(storage).ratingSources, ["imdb"], "The chosen rating sources are persisted");
+prefs.save(storage, { quality: "720", language: "en", nextEpisode: "countdown", ratingSources: [] });
+assert.deepStrictEqual(prefs.load(storage).ratingSources, [], "Every source may be switched off");
+assert.throws(function () {
+    prefs.save(storage, { quality: "720", language: "en", nextEpisode: "countdown", ratingSources: ["metacritic"] });
+}, /invalid/);
+prefs.save(storage, { quality: "720", language: "en", nextEpisode: "off", theme: "pure_black", accent: "teal" });
+assert.strictEqual(prefs.load(storage).theme, "pure_black", "The theme is a saved choice");
+assert.strictEqual(prefs.load(storage).accent, "teal", "The accent is a saved choice");
+assert.throws(function () { prefs.save(storage, { quality: "720", language: "en", nextEpisode: "off", theme: "neon" }); }, /invalid/);
+assert.throws(function () { prefs.save(storage, { quality: "720", language: "en", nextEpisode: "off", accent: "#ff0000" }); }, /invalid/);
 console.log("Tizen preference persistence/allowlist/reset tests: passed");

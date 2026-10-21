@@ -10,7 +10,7 @@ function harness() {
         get: function (obj, name) { if (name === "then") { return undefined; } return obj[name] || function () { return request(name); }; }
     });
     w.fetch = function () { assert.fail("No network in route journey"); };
-    ["i18n", "preferences", "queue", "subtitles", "television-ui", "catalogue-ui", "home-hero"].forEach(function (name) {
+    ["i18n", "plex-api", "preferences", "queue", "subtitles", "television-ui", "search-ui", "catalogue-ui", "home-hero"].forEach(function (name) {
         var text = fs.readFileSync(path.join(app, "js", name + ".js"), "utf8");
         if (name === "television-ui") { text = text.replace("return { open: openTelevision };", "return { open: openTelevision, guide: openGuide, program: openProgram, channel: openChannel, recordings: openRecordings };"); }
         if (name === "catalogue-ui") { text = text.replace("open: openWatchlist", "open: openWatchlist"); }
@@ -19,7 +19,7 @@ function harness() {
     w.VemmTelevision = { create: function () { return client; } };
     var text = fs.readFileSync(path.join(app, "main.js"), "utf8");
     text = text.slice(0, text.lastIndexOf('    addConnectForm("");')) +
-        'window.journey = { openProfiles: openProfiles, openServers: openServers, openFavorites: openFavorites, loadHome: loadHome, openSection: openSection, openListing: openListing, openBrowseOptions: openBrowseOptions, openLetters: openLetters, openSearch: openSearch, openDetail: openDetail, openPerson: openPerson, openSettings: openSettings, addConnectForm: addConnectForm, choices: settingsChoices, confirm: confirmServiceWrite, renderDetail: renderDetail, back: backView, visit: visit, service: serviceView, status: setStatus, focus: focusFirst, button: button, element: element, group: group, tile: titleTile, catalogue: catalogueUi, find: findCatalogueItem, state: function() { return { currentOffset: currentOffset, currentItems: currentItems.slice(), currentSection: currentSection }; }, setup: function(c) { currentClient=c; accountClient=c; servers=[]; homeSections=[]; } }; }());';
+        'window.journey = { openProfiles: openProfiles, openServers: openServers, openFavorites: openFavorites, loadHome: loadHome, openSection: openSection, openListing: openListing, openSearch: openSearch, openDetail: openDetail, openPerson: openPerson, openSettings: openSettings, addConnectForm: addConnectForm, choices: settingsChoices, confirm: confirmServiceWrite, renderDetail: renderDetail, back: backView, visit: visit, service: serviceView, status: setStatus, focus: focusFirst, button: button, element: element, group: group, tile: titleTile, catalogue: catalogueUi, find: findCatalogueItem, state: function() { return { currentOffset: currentOffset, currentItems: currentItems.slice(), currentSection: currentSection }; }, setup: function(c) { currentClient=c; accountClient=c; servers=[]; homeSections=[]; } }; }());';
     w.eval(text); w.journey.setup(client);
     var j = w.journey, screen = w.document.getElementById("screen");
     var options = { client: function () { return client; }, preferences: function () { return { language: "en" }; },
@@ -44,8 +44,6 @@ var routes = [
     ["home", function(h) { h.j.loadHome(false); }, []],
     ["library", function(h) { h.j.openSection(section); }, { items: [], totalSize: 0, offset: 0 }],
     ["listing/collections/children", function(h) { h.j.openListing("Collection", function () { return h.client.getChildren(); }, h.client); }, { Metadata: [] }],
-    ["filters", function(h) { h.j.openBrowseOptions(section); }, {}],
-    ["alphabet", function(h) { h.j.openLetters(section); }, {}],
     ["details", function(h) { h.j.openDetail("1", h.client); }, null],
     ["person", function(h) { h.j.openPerson({ tag: "Person", id: "1", tagKey: "synthetic" }, h.client); }, { Metadata: [] }],
     ["television", function(h) { h.tv.open(); }, []],
@@ -75,15 +73,15 @@ async function run() {
         assert.strictEqual(pagingBeforeSearch.currentOffset, 1);
         assert.strictEqual(pagingBeforeSearch.currentItems.length, 1);
         staleRetry.j.openSearch();
-        staleRetry.screen.querySelector('input[type="search"]').value = "";
-        staleRetry.click("Search");
+        assert(staleRetry.screen.querySelector(".search-keyboard"), "Search is the built-in keyboard");
+        staleRetry.j.status("Search failed", true);
         var emptyRetry = Array.from(staleRetry.screen.querySelectorAll("button")).find(function (button) {
             return /Retry/.test(button.textContent);
         });
         assert(emptyRetry, "Search validation should keep its own route action");
         emptyRetry.click();
         await settle();
-        assert.deepStrictEqual(staleRetry.calls, ["getSectionItems"],
+        assert.deepStrictEqual(staleRetry.calls, ["getLetters", "getSectionItems"],
             "Search Retry must never invoke the previous library's page loader");
         var pagingAfterRetry = staleRetry.j.state();
         assert.strictEqual(pagingAfterRetry.currentOffset, pagingBeforeSearch.currentOffset,

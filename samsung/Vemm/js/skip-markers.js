@@ -40,11 +40,45 @@
         if (!marker) { return null; }
         return {
             key: key(marker),
+            type: marker.type,
             label: marker.type === "intro" ? "Skip Intro" : "Skip Credits",
             action: marker.type === "credits" && isFinal(marker) ? "finish" : "seek",
             target: Number(marker.endTimeOffset)
         };
     }
 
-    return { markerAt: markerAt, prompt: prompt, key: key };
+    // What to do at an intro or credits marker: "button" (show Skip), "auto" (skip at once) or "off".
+    // Plex keeps no such account or server preference (plex.tv user profile and PMS /:/prefs carry
+    // none; Plex apps keep it per client), so the TV's setting is the default and a title can
+    // override it. Overrides live on this TV per server and show (or movie).
+    var MODES = ["button", "auto", "off"];
+    var OVERRIDES = "vemm-tizen-skip-overrides";
+    function titleKey(serverId, item) {
+        return String(serverId || "") + "/" + String(item.type === "episode" && item.grandparentRatingKey || item.ratingKey);
+    }
+    function overrides(storage) {
+        var all = null;
+        try { all = JSON.parse(storage.getItem(OVERRIDES) || "{}"); } catch (error) { all = null; }
+        return all && typeof all === "object" && !Array.isArray(all) ? all : {};
+    }
+    // The title's own choice for "intro" or "credits", or null when it follows the default.
+    function override(storage, serverId, item, type) {
+        var saved = overrides(storage)[titleKey(serverId, item)];
+        return saved && MODES.indexOf(saved[type]) !== -1 ? saved[type] : null;
+    }
+    // mode null returns the title to the default. Throws when the TV refuses to store it.
+    function setOverride(storage, serverId, item, type, mode) {
+        var all = overrides(storage);
+        var name = titleKey(serverId, item);
+        var entry = all[name] && typeof all[name] === "object" ? all[name] : {};
+        if (MODES.indexOf(mode) !== -1) { entry[type] = mode; } else { delete entry[type]; }
+        if (Object.keys(entry).length) { all[name] = entry; } else { delete all[name]; }
+        storage.setItem(OVERRIDES, JSON.stringify(all));
+    }
+    function mode(type, defaults, saved) {
+        return saved || (type === "intro" ? defaults.skipIntro : defaults.skipCredits) || "button";
+    }
+
+    return { markerAt: markerAt, prompt: prompt, key: key, override: override,
+        setOverride: setOverride, mode: mode };
 }));

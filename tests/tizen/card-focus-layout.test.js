@@ -3,6 +3,9 @@ var assert = require("assert");
 var fs = require("fs");
 var JSDOM = require("jsdom").JSDOM;
 var css = fs.readFileSync(require.resolve("../../samsung/Vemm/css/style.css"), "utf8");
+// The stylesheet as the TV paints it: style.css, then the colours of the (default) Blue theme.
+var painted = css + "\n" + require("../../samsung/Vemm/js/theme.js").css(require("../../samsung/Vemm/js/theme-rules.js"), "blue");
+var white = /rgb\(255, ?255, ?255\)/;
 
 function rule(selector) {
     var escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
@@ -27,13 +30,41 @@ try {
 } finally { dom.window.close(); }
 
 // The account avatar covers its own button background, so focus needs a ring outside it.
-assert(/box-shadow:\s*0 0 0 4px #d6e6f5/.test(finalRule(".browse-header .account-control:focus")),
+assert(/box-shadow:\s*0 0 0 4px \$focus-ring/.test(finalRule(".browse-header .account-control:focus")),
     "Focused account/avatar control needs a visible ring that the avatar image cannot cover");
 
-// Library cards need the same emphasis as Home cards, not a 2.5% scale and underline alone.
-var library = finalRule(".item-list .media-card:focus .poster");
-assert(/box-shadow:\s*0 0 0 4px #d6e6f5/.test(library), "Focused library poster needs a Blue Calm visible ring");
-assert(/scale\(1\.06\)/.test(rule(".item-list .media-card:focus")), "Focused library card scales like Home cards");
+// One focus look for every card: Home, library and search results lift by 6% and ring only the artwork in white;
+// the progress bar follows the poster, so it never lands on the title whatever the poster's height.
+["screen-home", "screen-library", "screen-search"].forEach(function (kind) {
+    var lookDom = new JSDOM("<style>" + painted + "</style><section class='screen " + kind + "'><div class='" +
+        (kind === "screen-library" ? "item-list" : "shelf-row") + "'><button class='media-card'><img class='poster'>" +
+        "<span class='card-progress'></span><span class='card-title'>T</span><span class='card-meta'>M</span>" +
+        "</button><button class='media-card'><img class='poster'></button></div></section>");
+    try {
+        var w = lookDom.window;
+        var focused = w.document.querySelector(".media-card");
+        focused.focus();
+        var look = w.getComputedStyle(focused);
+        assert.strictEqual(look.getPropertyValue("transform"), "scale(1.06)", kind + ": the focused card lifts like everywhere else");
+        assert(/^0 0 0 4px rgb\(255, ?255, ?255\)/.test(w.getComputedStyle(w.document.querySelector(".poster")).getPropertyValue("box-shadow")),
+            kind + ": a white ring frames the focused artwork");
+        assert(!white.test(look.getPropertyValue("box-shadow")) && !/solid/.test(look.getPropertyValue("outline")),
+            kind + ": the ring never frames the whole poster and caption");
+        assert(!/0 0 0 4px/.test(w.getComputedStyle(w.document.querySelectorAll(".poster")[1]).getPropertyValue("box-shadow")),
+            kind + ": only the focused card is ringed");
+        var bar = w.getComputedStyle(w.document.querySelector(".card-progress"));
+        assert(bar.getPropertyValue("position") !== "absolute" && /^-4px/.test(bar.getPropertyValue("margin-top")),
+            kind + ": the progress bar sits on the poster's bottom edge, not at a fixed offset");
+        if (kind === "screen-home") {
+            var title = w.getComputedStyle(w.document.querySelector(".card-title"));
+            assert(!/rgba|px/.test(title.getPropertyValue("box-shadow")), "No halo around the focused Home caption");
+            assert(/^(?:|transparent|rgba\(0, 0, 0, 0\))$/.test(title.getPropertyValue("background-color")),
+                "No plate or backdrop behind the focused Home caption: " + title.getPropertyValue("background-color"));
+            assert.strictEqual(w.getComputedStyle(w.document.querySelector(".card-meta")).getPropertyValue("width"), "200%",
+                "The Home year, episode or time-left line is as wide as the title above it");
+        }
+    } finally { lookDom.window.close(); }
+});
 
 // Children listings (Seasons, Episodes, Collection items) measured 270x350 season posters and
 // 564x214 episode stills on a 1920-wide TV: posters must be 2:3 and stills 16:9 of their card width.
@@ -53,12 +84,22 @@ var homeDom = new JSDOM("<style>" + css + "</style><section class='screen screen
 try {
     var w = homeDom.window;
     var homeCard = w.getComputedStyle(w.document.querySelector(".media-card"));
-    assert.strictEqual(homeCard.getPropertyValue("will-change"), "transform", "Home cards are their own layers");
+    assert.notStrictEqual(homeCard.getPropertyValue("will-change"), "transform", "Home cards are not permanent layers");
+    ["will-change", "-webkit-backface-visibility", "backface-visibility", "-webkit-transform", "transform"].forEach(function (name) {
+        var value = homeCard.getPropertyValue(name);
+        assert(!value || value === "auto" || value === "none" || value === "visible", "Idle Home cards carry no " + name + ": " + value);
+    });
+    // No selector that targets a card or poster may promote it to a layer.
+    var promoting = /will-change|translateZ|translate3d|backface-visibility/;
+    var cardRulesWithLayer = Array.prototype.filter.call(w.document.styleSheets[0].cssRules, function (r) {
+        return /media-card|.poster/.test(r.selectorText || "") && promoting.test(r.cssText);
+    });
+    assert.deepStrictEqual(cardRulesWithLayer.map(function (r) { return r.selectorText; }), [], "No card rule promotes a layer");
     var cardRules = Array.prototype.filter.call(w.document.styleSheets[0].cssRules, function (r) {
-        return r.selectorText === ".screen-home .media-card";
+        return r.selectorText === ".media-card";
     });
     assert(cardRules.some(function (r) { return r.style.getPropertyValue("transition") === "transform 120ms ease"; }),
-        "Home cards animate only their transform");
+        "Cards animate only their transform");
     w.document.querySelector(".media-card").focus();
     var focusedPoster = w.getComputedStyle(w.document.querySelector(".poster"));
     assert(!/brightness|blur/.test(focusedPoster.getPropertyValue("filter")), "No filter on a focused Home poster");

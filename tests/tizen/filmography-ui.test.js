@@ -24,6 +24,7 @@ Object.defineProperty(Node.prototype, "firstChild", { get: function () { return 
 Node.prototype.addEventListener = function (name, callback) { this.events[name] = callback; };
 Node.prototype.setAttribute = function () {};
 Node.prototype.focus = function () {};
+Node.prototype.querySelector = function () { return null; };
 Node.prototype.querySelectorAll = function () {
     var result = [];
     function visit(node) {
@@ -88,6 +89,7 @@ async function journey(indexFails, language, largeCareer) {
         }
     };
     var api = {
+        ratingBadges: function () { return []; },
         createAuthClient: function () { return {
             startAuthorization: function () { return Promise.resolve({ code: "TEST", id: 1 }); },
             pollAuthorization: function () { return Promise.resolve({ status: "linked", token: "synthetic-account-token" }); }
@@ -116,10 +118,6 @@ async function journey(indexFails, language, largeCareer) {
     click("Get a new code");
     await settle();
     click("Synthetic Guest");
-    await settle();
-    var serverButton = screen.querySelectorAll().find(function (node) { return /^Synthetic \(owned\)/.test(node.textContent); });
-    assert(serverButton, "Missing server control");
-    serverButton.events.click();
     await settle();
     screen.querySelectorAll().find(function (node) { return node.className === "media-card"; }).events.click();
     await settle();

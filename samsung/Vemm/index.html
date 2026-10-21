@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <!--
 THESIS: Content leads; remote actions remain explicit and quiet.
-OWN-WORLD: Near-black ground, neutral surfaces, white focus, system type and labelled capsules.
+OWN-WORLD: Themed near-black ground (Blue, Grey, Black or Pure black), raised surfaces, white focus, system type and labelled capsules.
 STORY: Choose a Plex identity/server, find media, inspect it, then explicitly play or confirm changes.
 FIRST VIEWPORT: Full-bleed featured artwork, persistent capsule navigation, explicit play/info and poster shelves.
 FORM: Remote-first, neutral display identity; visual inspiration credited in THIRD-PARTY-NOTICES.md.
@@ -12,6 +12,10 @@ FORM: Remote-first, neutral display identity; visual inspiration credited in THI
     <meta name="viewport" content="width=device-width, initial-scale=1"/>
     <title>Vemm</title>
     <link rel="stylesheet" type="text/css" href="css/style.css"/>
+    <!-- The theme colours style.css before the first paint: it reads the saved choice through preferences.js. -->
+    <script src="js/preferences.js"></script>
+    <script src="js/theme-rules.js"></script>
+    <script src="js/theme.js"></script>
 </head>
 <body>
     <object id="av-player" class="video-plane" type="application/avplayer"></object>
@@ -22,6 +26,7 @@ FORM: Remote-first, neutral display identity; visual inspiration credited in THI
                 <h1>Vemm</h1>
             </div>
             <p>Your media. At its best.</p>
+            <h2 class="header-title"></h2>
         </header>
         <main id="screen" class="screen"></main>
         <footer id="status" class="status" role="status" aria-live="polite"></footer>
@@ -33,18 +38,21 @@ FORM: Remote-first, neutral display identity; visual inspiration credited in THI
     <script src="js/model-register.js"></script>
     <script src="js/capabilities.js"></script>
     <script src="js/playback.js"></script>
+    <script src="js/preload.js"></script>
     <script src="js/queue.js"></script>
     <script src="js/television.js"></script>
     <script src="js/television-ui.js"></script>
+    <script src="js/search-ui.js"></script>
     <script src="js/catalogue-ui.js"></script>
     <script src="js/photos.js"></script>
     <script src="js/subtitles.js"></script>
     <script src="js/subtitle-search.js"></script>
-    <script src="js/preferences.js"></script>
     <script src="js/graphics.js"></script>
     <script src="js/session.js"></script>
     <script src="js/favorites.js"></script>
     <script src="js/recents.js"></script>
+    <script src="js/artwork-store.js"></script>
+    <script src="js/device-stats.js"></script>
     <script src="js/home-hero.js"></script>
     <script src="js/item-menu.js"></script>
     <script src="js/skip-markers.js"></script>

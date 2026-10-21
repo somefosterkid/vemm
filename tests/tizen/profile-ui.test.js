@@ -5,18 +5,25 @@ var vm = require("vm");
 
 function Node(tag, text) {
     this.tag = tag;
-    this.textContent = text || "";
+    this.text = text || "";
     this.children = [];
     this.events = {};
     this.value = "";
     this.attributes = {};
 }
+// A control's text includes its children (the profile name sits in a span).
+Object.defineProperty(Node.prototype, "textContent", {
+    get: function () { return this.text + this.children.map(function (child) { return child.textContent; }).join(""); },
+    set: function (value) { this.text = value; }
+});
 Node.prototype.appendChild = function (child) { this.children.push(child); return child; };
 Node.prototype.removeChild = function (child) { this.children.splice(this.children.indexOf(child), 1); };
 Object.defineProperty(Node.prototype, "firstChild", { get: function () { return this.children[0]; } });
 Node.prototype.addEventListener = function (name, callback) { this.events[name] = callback; };
 Node.prototype.setAttribute = function (name, value) { this.attributes[name] = value; };
+Node.prototype.getAttribute = function (name) { return this.attributes[name] === undefined ? null : this.attributes[name]; };
 Node.prototype.focus = function () {};
+Node.prototype.querySelector = function () { return null; };
 Node.prototype.querySelectorAll = function () {
     var result = [];
     function visit(node) {
@@ -36,16 +43,12 @@ async function run() {
     var linkPin = true;
     var protectedProfile = true;
     var document = {
-        getElementById: function (id) { return id === "screen" ? screen : status; },
+        getElementById: function (id) { return id === "screen" ? screen : id === "player-menu" ? null : status; },
         createElement: function (tag) { return new Node(tag); },
         querySelector: function () { return null; },
         addEventListener: function () {}
     };
     var accountApi = {
-        image: function (path) {
-            assert.strictEqual(path, "https://plex.tv/users/synthetic/avatar?c=1");
-            return Promise.resolve(new Blob(["synthetic avatar"], { type: "image/png" }));
-        },
         getProfiles: function () { return Promise.resolve([
             { uuid: "synthetic-profile", title: "Synthetic Guest", protected: protectedProfile,
                 thumb: "https://plex.tv/users/synthetic/avatar?c=1" }
@@ -59,6 +62,8 @@ async function run() {
         getServers: function () {
             return Promise.resolve([
                 { id: "offline", name: "Offline", owned: true, token: "", connections: [] },
+                { id: "other", name: "Other", owned: true, token: "synthetic-other-token",
+                    connections: [{ uri: "https://other.invalid" }] },
                 { id: "shared", name: "Shared", owned: false, token: "synthetic-server-token",
                     connections: [{ uri: "https://relay.invalid", relay: true }] }
             ]);
@@ -97,6 +102,13 @@ async function run() {
         assert(!control.disabled, "Disabled control: " + label);
         control.events.click();
     }
+    // Sign out asks first: the first match is the corner button, the last is the confirmation.
+    function signOut() {
+        click("Sign out");
+        var matches = screen.querySelectorAll().filter(function (node) { return node.textContent === "Sign out"; });
+        assert.strictEqual(matches.length, 2, "Sign out must ask for confirmation");
+        matches[1].events.click();
+    }
     async function settle() { for (var i = 0; i < 20; i += 1) { await Promise.resolve(); } }
     click("Get a new code");
     await settle();
@@ -105,7 +117,8 @@ async function run() {
         "Profiles must render their returned photo, retaining initials as a loading/error fallback");
     var avatar = identity.children.find(function (node) { return node.tag === "img"; });
     assert.strictEqual(identity.attributes["data-avatar"], undefined, "Initials remain while the photo loads");
-    assert.strictEqual(typeof avatar.onload, "function", "The photo must enter the bounded decode pipeline");
+    assert.strictEqual(avatar.src, "https://plex.tv/users/synthetic/avatar?c=1", "The photo is a plain image, which follows redirects");
+    assert.strictEqual(typeof avatar.onload, "function");
     avatar.onload();
     await settle();
     assert.strictEqual(identity.attributes["data-avatar"], "true", "Decoded photos must become visible");
@@ -145,7 +158,7 @@ async function run() {
     click("Back to profiles");
     await settle();
     linkPin = false;
-    click("Sign out");
+    signOut();
     resolveSwitch("synthetic-stale-token");
     await settle();
     assert.strictEqual(tokens.indexOf("synthetic-stale-token"), -1);
@@ -166,11 +179,15 @@ async function run() {
     click("Synthetic Guest");
     await settle();
     assert.strictEqual(switches, before + 1, "An unprotected profile must switch with one click");
+    assert(!screen.querySelectorAll().some(function (node) { return node.textContent === "Back to profiles"; }),
+        "An unprotected profile never shows the per-profile page");
     assert.strictEqual(status.textContent, "Temporary profile failure");
+    assert(screen.querySelectorAll().some(function (node) { return node.textContent === "Synthetic Guest"; }),
+        "A failed switch returns to the profiles with the error");
     transientFailure = false;
-    click("Retry");
+    click("Synthetic Guest");
     await settle();
-    assert.strictEqual(switches, before + 2, "Retry must reuse the selected profile without refetching profiles");
+    assert.strictEqual(switches, before + 2, "Selecting the profile again retries it");
     assert(tokens.indexOf("synthetic-unprotected-token") !== -1);
     assert(!screen.querySelectorAll().some(function (node) { return node.textContent === "Use this profile"; }),
         "An unprotected profile must not require an intermediate confirmation");

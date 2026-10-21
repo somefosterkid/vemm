@@ -5,18 +5,21 @@ var path = require("path");
 var JSDOM = require("jsdom").JSDOM;
 var app = path.join(__dirname, "../../samsung/Vemm");
 
-function harness() {
+function harness(seed) {
     var dom = new JSDOM(fs.readFileSync(path.join(app, "index.html"), "utf8"), {
         url: "https://app.synthetic.invalid", runScripts: "outside-only"
     });
     var data = { "vemm-tizen-account": JSON.stringify({ version: 2, storage: "unencrypted", token: "synthetic-account-token" }) };
+    Object.keys(seed || {}).forEach(function (key) { data[key] = seed[key]; });
     Object.defineProperty(dom.window, "localStorage", { value: {
         getItem: function (key) { return data[key] || null; },
         setItem: function (key, value) { data[key] = value; },
-        removeItem: function (key) { delete data[key]; }
+        removeItem: function (key) { delete data[key]; },
+        key: function (index) { return Object.keys(data)[index] || null; },
+        get length() { return Object.keys(data).length; }
     } });
     dom.window.fetch = function () { assert.fail("The synthetic account preferences UI must not use the network"); };
-    var state = { loads: 0, saves: [], fail: 503, profile: { autoSelectAudio: false, defaultAudioLanguage: "",
+    var state = { hold: !!seed, release: null, loads: 0, saves: [], fail: 503, profile: { autoSelectAudio: false, defaultAudioLanguage: "",
         defaultSubtitleLanguage: "en", autoSelectSubtitle: 1, defaultSubtitleForced: 0 } };
     dom.window.PlexApi = {
         createAuthClient: function () { return {
@@ -24,7 +27,8 @@ function harness() {
             pollAuthorization: function () { return Promise.resolve({ status: "pending" }); }
         }; },
         createAccountClient: function () { return {
-            getProfiles: function () { return Promise.resolve([]); },
+            getProfiles: function () { return Promise.resolve([{ uuid: "synthetic-profile", title: "Profile" }]); },
+            switchProfile: function () { return Promise.resolve("synthetic-profile-token"); },
             getServers: function () {
                 return Promise.resolve([{ id: "synthetic-server", name: "Synthetic", token: "synthetic-server-token",
                     connections: [{ uri: "https://server.synthetic.invalid" }] }]);
@@ -32,6 +36,7 @@ function harness() {
             accountPreferences: function () {
                 state.loads += 1;
                 if (state.fail) { var error = new Error("Synthetic"); error.status = state.fail; state.fail = 0; return Promise.reject(error); }
+                if (state.hold) { return new Promise(function (resolve) { state.release = function () { resolve({ profile: state.profile }); }; }); }
                 return Promise.resolve({ profile: state.profile });
             },
             saveAccountPreferences: function (query) { state.saves.push(query); return Promise.resolve({}); }
@@ -52,7 +57,7 @@ function harness() {
         });
     }
     return {
-        state: state, find: find,
+        state: state, find: find, data: data,
         text: function () { return dom.window.document.body.textContent; },
         click: function (pattern) {
             var node = find(pattern);
@@ -68,11 +73,12 @@ async function settle() { for (var i = 0; i < 20; i += 1) { await Promise.resolv
 async function run() {
     var ui = harness();
     await settle();
-    ui.click(/^Use linked account$/);
+    ui.click(/^Profile$/);
     await settle();
-    ui.click(/^Synthetic/);
-    await settle();
+    // The only server connects automatically.
     ui.click(/^Settings$/);
+    await settle();
+    ui.click(/^Audio & subtitles$/);
     await settle();
     assert(ui.text().includes("Audio & subtitles"));
     assert(ui.text().includes("Plex account preferences are unavailable. Select Retry."));
@@ -107,7 +113,38 @@ async function run() {
     await settle();
     assert.deepStrictEqual(JSON.parse(JSON.stringify(ui.state.saves.pop())), { defaultSubtitleForced: "2" });
     assert.strictEqual(ui.state.loads, 2, "Settings reuses the loaded preferences");
+    assert(JSON.parse(ui.data["vemm-tizen-account-audio-synthetic-profile"]).audioLanguage === "fr", "The saved choice is cached for the profile");
     ui.close();
-    console.log("Tizen account audio & subtitles settings: load/error/Retry/save journeys passed");
+
+    // A fresh boot with a cached profile draws immediately, then refreshes in place.
+    var cached = { autoSelectAudio: true, audioLanguage: "de", subtitleLanguage: "", subtitleMode: 2, subtitleForced: 0 };
+    var warm = harness({ "vemm-tizen-account-audio-synthetic-profile": JSON.stringify(cached) });
+    warm.state.fail = 0;
+    await settle();
+    warm.click(/^Profile$/);
+    await settle();
+    warm.click(/^Settings$/);
+    await settle();
+    warm.click(/^Audio & subtitles$/);
+    await settle();
+    assert.strictEqual(warm.state.loads, 1, "It still asks plex.tv");
+    assert(warm.state.release, "plex.tv has not answered yet");
+    assert(warm.find(/^Preferred audio language: Deutsch$/), "Cached values show before plex.tv answers");
+    assert(warm.find(/^Subtitles: Always$/));
+    assert(!warm.text().includes("Loading your Plex account preferences"), "No loading state with a cache");
+    warm.state.release();
+    await settle();
+    assert(warm.find(/^Preferred audio language: Original$/), "The refresh updates the page in place");
+    assert(warm.find(/^Subtitles: When audio isn't in the subtitle language$/));
+    assert.strictEqual(JSON.parse(warm.data["vemm-tizen-account-audio-synthetic-profile"]).subtitleMode, 1, "The cache follows the refresh");
+    warm.click(/^Back$/);
+    await settle();
+    warm.click(/^Privacy and data$/);
+    await settle();
+    warm.click(/^Sign out$/);
+    await settle();
+    assert.strictEqual(warm.data["vemm-tizen-account-audio-synthetic-profile"], undefined, "Sign out clears the cache");
+    warm.close();
+    console.log("Tizen account audio & subtitles settings: load/error/Retry/save/cache journeys passed");
 }
 run().catch(function (error) { console.error(error); process.exit(1); });

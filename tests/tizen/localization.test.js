@@ -28,6 +28,7 @@ function walk(node) {
 walk(acorn.parse(source, { ecmaVersion: 5 }));
 walk(acorn.parse(fs.readFileSync(require.resolve("../../samsung/Vemm/js/television-ui"), "utf8"), { ecmaVersion: 5 }));
 walk(acorn.parse(fs.readFileSync(require.resolve("../../samsung/Vemm/js/catalogue-ui"), "utf8"), { ecmaVersion: 5 }));
+walk(acorn.parse(fs.readFileSync(require.resolve("../../samsung/Vemm/js/search-ui"), "utf8"), { ecmaVersion: 5 }));
 ["es", "be"].forEach(function (language) {
     context.VemmI18n.setLanguage(language);
     var missing = Array.from(required).filter(function (text) { return !context.VemmI18n.has(text); });

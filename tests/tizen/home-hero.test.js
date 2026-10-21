@@ -43,3 +43,16 @@ assert.deepStrictEqual(keys(hero.pick(noRecent, 8)), ["x1", "y1", "x2", "y2"],
 assert.deepStrictEqual(hero.pick([], 8), []);
 assert.deepStrictEqual(hero.pick([{ hubIdentifier: "home.continue" }], 8), []);
 console.log("home-hero tests passed");
+
+var repeats = [
+    { hubIdentifier: "home.continue", Metadata: [
+        { ratingKey: "e1", type: "episode", grandparentRatingKey: "S1" },
+        { ratingKey: "e2", type: "episode", grandparentTitle: "Named" }] },
+    { hubIdentifier: "home.television.recent", Metadata: [
+        { ratingKey: "e3", type: "episode", grandparentRatingKey: "S1" },
+        { ratingKey: "e4", type: "episode", grandparentTitle: "Named" },
+        { ratingKey: "S1", type: "show" }, { ratingKey: "S2", type: "show" }] },
+    { hubIdentifier: "home.movies.recent", Metadata: [{ ratingKey: "m1", type: "movie" }, { ratingKey: "m1", type: "movie" }, { ratingKey: "m2", type: "movie" }] }
+];
+assert.deepStrictEqual(keys(hero.pick(repeats, 8)), ["e1", "e4", "m1", "S2", "m2"],
+    "A show appears once however many episodes or its own entry are listed, and a movie once");

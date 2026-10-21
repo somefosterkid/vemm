@@ -46,23 +46,28 @@ Source-maintained assets:
 PNG with Python's standard library. No font download, image library or build
 dependency is introduced.
 
-The logo palette and built Blue Calm interface roles are:
+The logo palette and the default Blue (Blue Calm) theme's interface roles are:
 
 | Role | Value |
 |---|---|
 | Primary / front fold | `#3B82F6` |
 | Light / rear fold | `#B7D0FF` |
 | Canvas | `#081522` |
-| Selected / elevated surface | `#0F2747` |
-| Action / progress | `#5E7FA7` |
-| Focus | `#D6E6F5` |
+| Surface / raised surface | `#102238` / `#13283F` |
+| Selected surface | `#1D3C66` |
+| Play action / progress | `#2F6BCC` / `#6B93C9` |
+| Focus fill / text | `#D6E6F5` / `#0F2747` |
+| Focus ring (artwork) | `#FFFFFF` |
 | Secondary text | `#D7DBE3` |
 | Divider | `#4B5C63` |
+
+The Grey, Black and Pure black (OLED) themes and the accent choices are described in
+[`samsung/DESIGN.md`](../../samsung/DESIGN.md#themes-and-colour-tokens); the logo keeps its colours in every theme.
 
 System typography, cinematic artwork composition and remote-first spacing
 remain. The UI is text-first: decorative menu glyphs are suppressed; compact
 playback transport glyphs and profile artwork remain because they carry
-functional meaning. Blue is reserved for identity, progress, focus and selected
+functional meaning. The accent is reserved for progress, the play action and selected
 state rather than decorating every surface.
 
 ## Usage and non-affiliation

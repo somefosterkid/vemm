@@ -156,7 +156,8 @@ unique temporary output directory and removes only its own output on exit.
 generated-locale freshness and strict Acorn ES5 parsing. Dependencies are declared and locked under
 `tests/tizen/`; they are host tools, not production assets. Use
 `node tools/tizen/build-locales.js --write` after editing `samsung/strings.json` or
-the inherited catalogs now maintained in `samsung/locales/`.
+the inherited catalogs now maintained in `samsung/locales/`, and
+`node tools/tizen/build-theme.js --write` after changing a colour in `samsung/Vemm/css/style.css`.
 None of these commands launch a Samsung runtime.
 
 Generic, app-independent tooling — environment doctor, project generator, manifest/privilege audit,

@@ -671,7 +671,7 @@ evidence; it is not replaced by another media server.
 - [ ] DVR server acceptance, target storage/location selection and comprehensive conflict-management workflows.
 - [x] Watchlist host operations: account-backed paged reads, confirmed add/remove, and exact-GUID local availability across scoped server grants.
 - [ ] Watchlist cloud/profile acceptance and remote paging/recovery on the packaged app.
-- [x] Plex catalogue metadata search/details and local matching; source-backed and synthetic signed-account journey exercised.
+- [x] Discover (Plex catalogue) metadata search/details and local matching; source-backed and synthetic signed-account journey exercised.
 - [ ] Licensed/ad-supported catalogue playback: establish Plex service authorization, DRM and ad obligations; do not substitute personal-PMS playback contracts.
 - [ ] Inventory remaining official-client features/entitlements and map each to implemented, unsupported or blocked evidence.
 

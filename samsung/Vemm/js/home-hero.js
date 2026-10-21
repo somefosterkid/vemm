@@ -16,6 +16,15 @@
         return id === "home.continue" || id === "home.ondeck" || id.indexOf("recent") !== -1;
     }
 
+    // One banner slot per movie and per show: episodes count as their show.
+    function identity(item) {
+        if (item.type === "episode") {
+            var show = item.grandparentRatingKey || item.grandparentTitle;
+            return show ? "show:" + show : "";
+        }
+        return (item.type === "show" ? "show:" : "") + item.ratingKey;
+    }
+
     function roundRobin(hubs, limit) {
         var picked = [];
         var seen = {};
@@ -28,8 +37,9 @@
                 while (cursors[h] < metadata.length) {
                     var item = metadata[cursors[h]];
                     cursors[h] += 1;
-                    if (item && item.ratingKey && !seen[item.ratingKey] && types.indexOf(item.type) !== -1) {
-                        seen[item.ratingKey] = true;
+                    var key = item && item.ratingKey && types.indexOf(item.type) !== -1 ? identity(item) || item.ratingKey : "";
+                    if (key && !seen[key]) {
+                        seen[key] = true;
                         picked.push(item);
                         progressed = true;
                         break;

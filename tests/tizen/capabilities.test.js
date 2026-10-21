@@ -95,7 +95,7 @@ function settingsJourney(info, language, expected) {
         ["i18n","model-register","capabilities","preferences"].forEach(function(name){w.eval(fs.readFileSync("samsung/Vemm/js/"+name+".js","utf8"));});
         var source=fs.readFileSync("samsung/Vemm/main.js","utf8");
         source=source.slice(0,source.lastIndexOf('    addConnectForm("");'))+
-            'preferences.language="'+language+'"; window.VemmI18n.setLanguage(preferences.language); openSettings(); }());';
+            'preferences.language="'+language+'"; window.VemmI18n.setLanguage(preferences.language); openSettings("Playback"); }());';
         w.eval(source);
         var text = w.document.body.textContent;
         assert(text.includes(expected),"Settings exposes localized capability uncertainty: "+language);
@@ -122,19 +122,102 @@ function qualityPolicyJourney(mode, expected) {
         source = source.slice(0, source.lastIndexOf('    addConnectForm("");')) +
             'preferences.directPlay = "' + mode + '";' +
             'playerItem = {ratingKey:"1",type:"movie",Media:[{container:"mp4",videoCodec:"h264",audioCodec:"aac",' +
-            'width:1920,height:1080,Part:[{id:"1",key:"/library/parts/1/file",Stream:[{streamType:1,codec:"h264"}]}]}]};' +
+            'width:1920,height:1040,bitrate:2051,Part:[{id:"1",key:"/library/parts/1/file",Stream:[{streamType:1,codec:"h264"}]}]}]};' +
             'playerSettings = {mediaIndex:0,quality:"original",profile:{evidence:"synthetic-profile",' +
             'video:["h264"],audio:["aac"],containers:["mp4"],maxWidth:1920,maxHeight:1080}};' +
             'player = {quality:function(){return {source:playerItem.Media[0],stream:playerItem.Media[0],mode:"direct"};}};' +
             'openQuality(); }());';
         w.eval(source);
-        var original = Array.from(w.document.querySelectorAll("#player-menu button")).find(function (button) {
-            return button.textContent.indexOf("Original quality") !== -1;
-        });
-        assert(original && original.textContent.includes(expected),
-            "The Original prediction must respect Direct Play " + mode + ": " + (original && original.textContent));
+        var original = w.document.querySelector("#player-menu button");
+        assert(original && original.textContent === expected,
+            "The top choice says what Direct Play " + mode + " asks for: " + (original && original.textContent));
     } finally { dom.window.close(); }
 }
-qualityPolicyJourney("off", "Converts on server");
-qualityPolicyJourney("auto", "Direct Play");
+// Played directly, the file's own 2.1 Mbps; converted, the 8 Mbps PMS needs to keep 1080p.
+qualityPolicyJourney("off", "1080p – 8 Mbps");
+qualityPolicyJourney("auto", "1080p – 2.1 Mbps");
 console.log("Tizen quality-menu direct-play policy labels: passed");
+
+// The in-player picker is one column under resolution headings, and FHD panels never see 1440p or 4K.
+function qualityLayoutJourney(uhdPanel, headings, labels) {
+    var dom = new JSDOM(fs.readFileSync("samsung/Vemm/index.html", "utf8"), {
+        url: "https://synthetic.invalid", runScripts: "outside-only"
+    });
+    try {
+        var w = dom.window;
+        Object.defineProperty(w.navigator, "userAgent", { value: tizen3 });
+        w.webapis = { productinfo: Object.assign(product("OTHER2017", "x"), { isUdPanelSupported: function () { return uhdPanel; } }) };
+        w.fetch = function () { assert.fail("Opening quality choices must not contact Plex"); };
+        ["i18n", "model-register", "capabilities", "preferences", "playback"].forEach(function (name) {
+            w.eval(fs.readFileSync("samsung/Vemm/js/" + name + ".js", "utf8"));
+        });
+        var source = fs.readFileSync("samsung/Vemm/main.js", "utf8");
+        source = source.slice(0, source.lastIndexOf('    addConnectForm("");')) +
+            'playerItem = {ratingKey:"1",type:"movie",Media:[{container:"mp4",videoCodec:"h264",audioCodec:"aac",' +
+            'width:3840,height:2160,Part:[{id:"1",key:"/library/parts/1/file",Stream:[{streamType:1,codec:"h264"}]}]}]};' +
+            'playerSettings = {mediaIndex:0,quality:"original",profile:{evidence:"synthetic-profile",' +
+            'video:["h264"],audio:["aac"],containers:["mp4"],maxWidth:1920,maxHeight:1080}};' +
+            'player = {quality:function(){return {source:playerItem.Media[0],stream:playerItem.Media[0],mode:"direct"};}};' +
+            'openQuality(); }());';
+        w.eval(source);
+        var menu = w.document.getElementById("player-menu");
+        assert.deepStrictEqual(Array.from(menu.querySelectorAll(".group-title")).map(function (node) { return node.textContent; }),
+            headings, "Resolution headings, Original first");
+        assert(!menu.querySelector(".group-title button, .group-title[tabindex]"), "Headings are not focusable");
+        var buttons = Array.from(menu.querySelectorAll("button")).map(function (node) { return node.textContent.replace(/^✓ /, ""); });
+        assert.deepStrictEqual(buttons.slice(1, 1 + labels.length), labels, "Highest Mbps first within a resolution");
+        assert.strictEqual(buttons[0].indexOf("Original quality"), 0);
+        assert.strictEqual(menu.querySelector('[aria-pressed="true"]').textContent.indexOf("Original quality") !== -1, true);
+        assert.strictEqual(menu.querySelectorAll("button")[0], w.document.activeElement, "Focus starts on the chosen option");
+        assert(buttons.indexOf("Close menu") === -1 && buttons.indexOf("Playback options") === -1,
+            "Back goes up a level; the menu has no close or return buttons");
+    } finally { dom.window.close(); }
+}
+qualityLayoutJourney(true, ["Original", "4K", "1440p", "1080p", "720p", "480p"], [
+    "2160p · 40 Mbps (converts)", "1440p · 25 Mbps (converts)", "1080p · 20 Mbps (converts)",
+    "1080p · 16 Mbps (converts)", "1080p · 12 Mbps (converts)", "1080p · 10 Mbps (converts)",
+    "1080p · 8 Mbps (converts)", "720p · 4 Mbps (converts)", "720p · 2 Mbps (converts)", "480p · 0.7 Mbps (converts)"]);
+qualityLayoutJourney(false, ["Original", "1080p", "720p", "480p"], [
+    "1080p · 20 Mbps (converts)", "1080p · 16 Mbps (converts)", "1080p · 12 Mbps (converts)",
+    "1080p · 10 Mbps (converts)", "1080p · 8 Mbps (converts)", "720p · 4 Mbps (converts)",
+    "720p · 2 Mbps (converts)", "480p · 0.7 Mbps (converts)"]);
+// The in-player picker's top choice is the file's own size at what is asked for; it hides presets above
+// the file's size or at or above that bitrate, and a saved quality at or above it is the top choice.
+function qualitySourceJourney(bitrate, active, expected, top, pressedLabel) {
+    var dom = new JSDOM(fs.readFileSync("samsung/Vemm/index.html", "utf8"), {
+        url: "https://synthetic.invalid", runScripts: "outside-only"
+    });
+    try {
+        var w = dom.window;
+        w.fetch = function () { assert.fail("Opening quality choices must not contact Plex"); };
+        ["i18n", "preferences", "playback"].forEach(function (name) {
+            w.eval(fs.readFileSync("samsung/Vemm/js/" + name + ".js", "utf8"));
+        });
+        var source = fs.readFileSync("samsung/Vemm/main.js", "utf8");
+        source = source.slice(0, source.lastIndexOf('    addConnectForm("");')) +
+            'playerItem = {ratingKey:"1",type:"movie",Media:[{container:"mp4",videoCodec:"h264",audioCodec:"aac",' +
+            'width:1920,height:1080,bitrate:' + bitrate + ',Part:[{id:"1",key:"/library/parts/1/file",Stream:[{streamType:1,codec:"h264"}]}]}]};' +
+            'playerSettings = {mediaIndex:0,quality:"' + active + '",profile:{evidence:"synthetic-profile",' +
+            'video:["h264"],audio:["aac"],containers:["mp4"],maxWidth:1920,maxHeight:1080}};' +
+            'player = {quality:function(){return {source:playerItem.Media[0],stream:playerItem.Media[0],mode:"direct"};}};' +
+            'openQuality(); }());';
+        w.eval(source);
+        var buttons = Array.from(w.document.querySelectorAll("#player-menu button"));
+        var labels = buttons.map(function (node) { return node.textContent; }).filter(function (text) { return /converts[)]$/.test(text); });
+        assert.deepStrictEqual(labels, expected);
+        assert.strictEqual(buttons[0].textContent, top, "The top choice names what is asked for (" + bitrate + ")");
+        var pressed = w.document.querySelector('#player-menu [aria-pressed="true"]');
+        assert.strictEqual(pressed.textContent, pressedLabel || top,
+            "A saved quality at or above this file's top is the top choice");
+    } finally { dom.window.close(); }
+}
+var below1080p = ["720p · 4 Mbps (converts)", "720p · 2 Mbps (converts)", "480p · 0.7 Mbps (converts)"];
+// An 8.1 Mbps 1080p episode with the saved quality 1080p 20 Mbps.
+qualitySourceJourney(8109, "1080h", ["1080p · 8 Mbps (converts)"].concat(below1080p), "1080p – 8.1 Mbps");
+qualitySourceJourney(8000, "original", below1080p, "1080p – 8 Mbps");
+qualitySourceJourney(8000, "2160", below1080p, "1080p – 8 Mbps");
+// A 2.1 Mbps 1080p film that plays directly: nothing at or above its own 2.1 Mbps is offered.
+qualitySourceJourney(2051, "720l", ["720p · 2 Mbps (converts)", "480p · 0.7 Mbps (converts)"], "1080p – 2.1 Mbps", "720p · 2 Mbps (converts)");
+qualitySourceJourney(0, "original", ["1080p · 20 Mbps (converts)", "1080p · 16 Mbps (converts)", "1080p · 12 Mbps (converts)",
+    "1080p · 10 Mbps (converts)", "1080p · 8 Mbps (converts)"].concat(below1080p), "Original quality");
+console.log("Tizen quality picker layout and panel gating: passed");

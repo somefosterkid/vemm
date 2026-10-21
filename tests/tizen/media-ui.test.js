@@ -44,7 +44,8 @@ async function run() {
         calls.push({ path: url.pathname, method: options.method, query: url.searchParams });
         var container;
         if (url.pathname === "/api/v2/home/users") {
-            return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve({ users: [] }); } });
+            // plex.tv cannot list profiles, so the linked account is offered.
+            return Promise.resolve({ ok: false, status: 500 });
         } else if (url.pathname === "/api/v2/resources") {
             return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve([{
                 clientIdentifier: "synthetic-server", name: "Synthetic PMS", provides: "server", owned: true,
@@ -108,11 +109,12 @@ async function run() {
         } else { return Promise.resolve({ ok: false, status: 404 }); }
         return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve({ MediaContainer: container }); } });
     };
-    ["plex-api", "avplay", "playback", "queue", "photos", "television", "television-ui", "catalogue-ui", "subtitles", "preferences", "session", "i18n"].forEach(function (name) {
+    ["plex-api", "avplay", "playback", "queue", "photos", "television", "television-ui", "search-ui", "catalogue-ui", "subtitles", "preferences", "session", "home-hero", "item-menu", "recents", "i18n"].forEach(function (name) {
         window.eval(fs.readFileSync(path.join(app, "js", name + ".js"), "utf8"));
     });
     window.localStorage.setItem("vemm-tizen-account", JSON.stringify({ version: 2, storage: "unencrypted", token: "synthetic-account-token" }));
     window.eval(fs.readFileSync(path.join(app, "main.js"), "utf8"));
+    function press(keyCode) { window.document.dispatchEvent(new window.KeyboardEvent("keydown", { keyCode: keyCode, bubbles: true })); }
     function click(label) {
         var node = Array.from(window.document.querySelectorAll("button")).find(function (button) { return button.textContent === label; });
         assert(node, "Missing control: " + label + "; current screen: " + window.document.body.textContent);
@@ -143,9 +145,23 @@ async function run() {
         click("Back"); await settle();
         click("Back"); await settle();
         click("Back"); await settle();
-        click("Plex catalogue"); await settle();
-        window.document.querySelector('input[type="search"]').value = "Synthetic";
-        click("Search"); await settle();
+        assert(!Array.from(window.document.querySelectorAll("button")).some(function (node) { return node.textContent === "Plex catalogue"; }),
+            "The catalogue entry is renamed");
+        click("Discover"); await settle();
+        assert.strictEqual(window.document.querySelector(".screen h2").textContent, "Discover", "The page title is renamed");
+        assert(window.document.querySelector(".screen-catalogue-search .search-keyboard"), "Discover uses the shared built-in keyboard");
+        assert.strictEqual(window.document.querySelectorAll(".search-keyboard .keyboard-row").length, 4);
+        assert.strictEqual(window.document.querySelectorAll(".search-keyboard .keyboard-row button").length, 12 * 3 + 3);
+        assert(!window.document.querySelector('input[type="search"]'), "Discover must not open the Tizen IME");
+        assert.strictEqual(window.document.activeElement.textContent, "A");
+        assert(window.document.querySelector(".search-keyboard .keyboard-body > .keyboard-keys"), "Discover keeps the keys on the left");
+        assert(window.document.querySelector(".search-keyboard .keyboard-body > .catalogue-results"), "Discover results sit beside the keys");
+        var discoverSearches = calls.filter(function (call) { return call.path === "/library/search"; }).length;
+        "SYNTHETIC".split("").forEach(function (letter) { click(letter); });
+        assert.strictEqual(calls.filter(function (call) { return call.path === "/library/search"; }).length, discoverSearches, "Typing is debounced");
+        await new Promise(function (resolve) { setTimeout(resolve, 450); }); await settle();
+        assert.strictEqual(calls.filter(function (call) { return call.path === "/library/search"; }).length, discoverSearches + 1);
+        assert.strictEqual(calls.filter(function (call) { return call.path === "/library/search"; }).pop().query.get("query"), "SYNTHETIC");
         click("Synthetic Watchlist movie"); await settle();
         assert(window.document.querySelector(".synopsis").textContent.includes("Cloud metadata"));
         click("Find in my libraries"); await settle();
@@ -158,7 +174,7 @@ async function run() {
         assert(watchlisted);
         click("Refresh"); await settle();
         for (var back = 0; back < 8 && window.document.querySelector(".screen h2").textContent !== "Home"; back += 1) {
-            click("Back"); await settle();
+            press(10009); await settle();
         }
         assert.strictEqual(window.document.querySelector(".screen h2").textContent, "Home");
         click("Music"); await settle();
@@ -177,8 +193,8 @@ async function run() {
         assert(window.document.body.textContent.includes("Track 2"), "Manual next must bypass repeat-one");
         click("More");
         click("Stop and return to details"); await settle();
-        click("Back"); await settle();
-        click("Back to Home"); await settle();
+        press(10009); await settle();
+        press(27); await settle();
         click("Photos"); await settle();
         window.document.querySelector(".media-card").click(); await settle();
         assert(window.document.querySelector(".screen-photos .photo-controls"), "Photo navigation is grouped below the image");
@@ -194,7 +210,7 @@ async function run() {
         assert(revoked.length >= 2, "Viewer transitions and back must release object URLs");
         assert.strictEqual(calls.filter(function (call) { return call.path === "/:/timeline"; }).length, timelines,
             "Viewing/slideshow photos must not write viewing progress");
-        click("Back to Home"); await settle();
+        press(27); await settle();
         click("Live TV and DVR"); await settle();
         assert(window.document.querySelector(".screen-television .selection-list"), "Guide providers share selection-list layout");
         click("Synthetic guide"); await settle();

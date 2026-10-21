@@ -24,7 +24,8 @@ async function run() {
         var url = new URL(target);
         calls.push({ path: url.pathname, method: options.method });
         var payload;
-        if (url.pathname === "/api/v2/home/users") { payload = { users: [] }; }
+        // plex.tv cannot list profiles, so the linked account is offered.
+        if (url.pathname === "/api/v2/home/users") { return Promise.resolve({ ok: false, status: 500 }); }
         else if (url.pathname === "/api/v2/resources") {
             payload = [{ clientIdentifier: "synthetic-server", name: "Synthetic PMS", provides: "server", owned: true,
                 accessToken: "synthetic-server-token", connections: [{ uri: "https://pms.synthetic.invalid" }] }];
@@ -86,7 +87,7 @@ async function run() {
         }), "An incomplete source must be rejected before queue creation, negotiation, selection or progress");
         assert.strictEqual(nativeOpens, 0);
         movie.Media[0].Part[0].Stream = [{ streamType: 1, codec: "h264" }];
-        click("Back");
+        window.document.dispatchEvent(new window.KeyboardEvent("keydown", { keyCode: 10009, bubbles: true }));
         await settle();
         window.document.querySelector(".media-card").click();
         await settle();
