@@ -6171,10 +6171,6 @@
             openSettings(settingsSection);
         }, true, "settings");
         preload.setAttribute("aria-pressed", String(preferences.preloadArtwork));
-        notes.appendChild(element("p", "help-text", translate(
-            "Reads the saved pictures when Vemm starts, so Home shows them before the server answers. Uses a little memory. On by default.")));
-        notes.appendChild(element("p", "help-text", translate(
-            "Also keeps the pictures in library grids, in the same space. Off by default. Turning it off deletes only those.")));
         var used = element("p", "help-text");
         notes.appendChild(used);
         if (artworkStore) {
@@ -6343,7 +6339,6 @@
     function settingsSections() {
         var sections = [{ title: "Playback", build: function (menu, notes) {
             var playbackSettings = group(menu, "", "settings-group");
-            notes.appendChild(element("p", "help-text", directPlaySummary()));
             button(playbackSettings, translate("Quality: {quality}", { quality: qualityName(preferences.quality) }), function () {
                 // Recomputed on every render, so a recheck or a new choice shows up when coming back.
                 function choices() {
@@ -6521,8 +6516,6 @@
                 openSettings(settingsSection);
             }, false, "settings");
             artworkToggle.setAttribute("aria-pressed", String(preferences.saveHomeArtwork));
-            notes.appendChild(element("p", "help-text", translate(
-                "Keeps the pictures shown on Home on this TV, up to the storage limit, so Home appears faster after launch. Off by default. Turning it off deletes them.")));
             if (preferences.saveHomeArtwork) { artworkOptions(performance, notes); }
         } });
         if (devMode()) {
@@ -6534,12 +6527,6 @@
                     openSettings("");
                 }, false, "settings");
                 notes.appendChild(element("p", "help-text", translate("Technical readouts for diagnosing problems. Stats for nerds also shows playback decisions and buffering while this is on.")));
-                var device = element("div", "device-stats");
-                notes.appendChild(device);
-                // One reading per line: joined, they wrapped mid-phrase at 1080p.
-                deviceStatsLines(function (lines) {
-                    lines.forEach(function (line) { device.appendChild(element("p", "help-text", line)); });
-                });
             } });
         }
         sections.push({ title: "Privacy and data", build: function (menu, notes) {
@@ -6755,6 +6742,12 @@
             shown.settingsSection = section;
             restoreView = shown;
         } else {
+            var device = element("div", "device-stats");
+            notes.appendChild(device);
+            // One reading per line: joined, they wrapped mid-phrase at 1080p.
+            deviceStatsLines(function (lines) {
+                lines.forEach(function (line) { device.appendChild(element("p", "help-text", line)); });
+            });
             var sectionIcons = { "Playback": "film", "Audio & subtitles": "audio", "Text overlay appearance": "subtitles",
                 "Libraries": "library", "Home": "television", "Developer": "settings", "Profile": "profile", "Language": "language", "Appearance": "palette", "Graphics": "sparkle", "Performance": "gauge", "Privacy and data": "shield" };
             sections.forEach(function (candidate) {

@@ -95,7 +95,7 @@ function settingsJourney(info, language, expected) {
         ["i18n","model-register","capabilities","preferences"].forEach(function(name){w.eval(fs.readFileSync("samsung/Vemm/js/"+name+".js","utf8"));});
         var source=fs.readFileSync("samsung/Vemm/main.js","utf8");
         source=source.slice(0,source.lastIndexOf('    addConnectForm("");'))+
-            'preferences.language="'+language+'"; window.VemmI18n.setLanguage(preferences.language); openSettings("Playback"); }());';
+            'preferences.language="'+language+'"; window.VemmI18n.setLanguage(preferences.language); openSettings("Privacy and data"); Array.prototype.filter.call(document.querySelectorAll("button"), function (b) { return b.textContent === translate("Diagnostics"); })[0].click(); }());';
         w.eval(source);
         var text = w.document.body.textContent;
         assert(text.includes(expected),"Settings exposes localized capability uncertainty: "+language);

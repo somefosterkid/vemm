@@ -362,8 +362,9 @@ async function run() {
         assert.strictEqual(window.document.activeElement, sectionButtons[sectionButtons.length - 1], "Up on the first item wraps to the last");
         pressKey(40);
         assert.strictEqual(window.document.activeElement, sectionButtons[0], "Down on the last item wraps to the first");
-        click("Playback");
-        assert.strictEqual(headerTitle(), "Playback");
+        Array.from(window.document.querySelectorAll(".settings-menu button")).find(function (node) { return node.textContent === "Text overlay appearance"; }).focus();
+        click("Text overlay appearance");
+        assert.strictEqual(headerTitle(), "Text overlay appearance");
         assert(!window.document.querySelector(".screen .page-title"), "A section page has no in-content title");
         assert(window.document.querySelector(".settings-menu .menu-control"), "A section page holds its controls");
         assert(!window.document.querySelector(".settings-menu .help-text"), "Info text is not inside the list card");
@@ -371,7 +372,7 @@ async function run() {
         assert(notes, "Info text sits below the options, outside the card");
         assert(window.document.querySelector(".settings-menu").compareDocumentPosition(notes) & 4, "Info text follows the list");
         click("Back");
-        assert.strictEqual(window.document.activeElement.textContent, "Playback", "Back restores focus on the section entry");
+        assert.strictEqual(window.document.activeElement.textContent, "Text overlay appearance", "Back restores focus on the section entry");
         assert.strictEqual(headerTitle(), "Settings");
         Array.from(window.document.querySelectorAll(".settings-menu button")).find(function (node) { return node.textContent === "Language"; }).focus();
         click("Language");
