@@ -828,6 +828,32 @@ async function run() {
     assert(!test.calls.some(function (call) { return call[0] === "progress"; }), "Direct play has no conversion to ask about");
     await session.stop();
 
+    // While the server cannot be reached the progress reports fail every 10 s; the viewer hears of it once, and
+    // again only after a report has got through in between.
+    var outage = rig();
+    var failing = true;
+    var heard = [];
+    outage.client.timeline = function (media, time, phase) {
+        outage.calls.push(["timeline", time, phase]);
+        return failing ? Promise.reject(new Error("network")) : Promise.resolve();
+    };
+    var outageSession = playback.create({ client: outage.client, adapter: outage.adapter, item: item,
+        onEvent: function (event) { if (/^progress-/.test(event.type)) { heard.push(event.type); } } });
+    await outageSession.start();
+    await outageSession.pause();
+    await outageSession.play();
+    await outageSession.pause();
+    assert.deepStrictEqual(heard, ["progress-error"], "Failed reports in a row are one notice, not one each");
+    failing = false;
+    await outageSession.play();
+    assert.deepStrictEqual(heard, ["progress-error", "progress-restored"], "A report that gets through says so");
+    await outageSession.pause();
+    assert.strictEqual(heard.length, 2, "and says it once");
+    failing = true;
+    await outageSession.play();
+    assert.deepStrictEqual(heard.slice(2), ["progress-error"], "A later outage is a new notice");
+    await outageSession.stop().catch(function () { /* the read-back may fail too */ });
+
     console.log("Tizen playback negotiation/progress/read-back tests: passed");
 }
 run().catch(function (error) { console.error(error); process.exit(1); });

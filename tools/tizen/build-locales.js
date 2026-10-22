@@ -29,7 +29,7 @@ function walk(node) {
     });
 }
 
-["main.js", "js/television-ui.js", "js/catalogue-ui.js", "js/search-ui.js"].forEach(function (name) {
+["main.js", "js/television-ui.js", "js/catalogue-ui.js", "js/search-ui.js", "js/playlists.js"].forEach(function (name) {
     walk(acorn.parse(fs.readFileSync(path.join(root, "samsung/Vemm", name), "utf8"), { ecmaVersion: 5 }));
 });
 

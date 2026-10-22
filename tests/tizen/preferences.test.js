@@ -9,11 +9,11 @@ var storage = {
 };
 assert.deepStrictEqual(prefs.load(storage), { quality: "original", language: "en", nextEpisode: "countdown",
     continueAction: "details", skipInterval: 10, subtitleSize: "medium", subtitlePosition: "low",
-    subtitleColor: "white", subtitleBackground: "off", subtitleDelayMs: 0, directPlay: "auto", enhancedGraphics: false, saveHomeArtwork: false, artworkLimitMb: 10, saveLibraryArtwork: false, preloadArtwork: true, autoAdvanceFeatures: true, minBuffer: 1, skipIntro: "button", skipCredits: "button", theme: "blue", accent: "theme", ratingSources: ["rt_critic", "rt_audience", "imdb", "tmdb"] });
+    subtitleColor: "white", subtitleBackground: "off", subtitleDelayMs: 0, directPlay: "auto", enhancedGraphics: false, saveHomeArtwork: false, artworkLimitMb: 10, saveLibraryArtwork: false, preloadArtwork: true, autoAdvanceFeatures: true, minBuffer: 1, skipIntro: "button", skipCredits: "button", theme: "blue", accent: "theme", autoOpenProfile: false, ratingSources: ["rt_critic", "rt_audience", "imdb", "tmdb"] });
 value = JSON.stringify({ quality: "720", language: "en", autoNext: false });
 assert.deepStrictEqual(prefs.load(storage), { quality: "720", language: "en", nextEpisode: "off",
     continueAction: "details", skipInterval: 10, subtitleSize: "medium", subtitlePosition: "low",
-    subtitleColor: "white", subtitleBackground: "off", subtitleDelayMs: 0, directPlay: "auto", enhancedGraphics: false, saveHomeArtwork: false, artworkLimitMb: 10, saveLibraryArtwork: false, preloadArtwork: true, autoAdvanceFeatures: true, minBuffer: 1, skipIntro: "button", skipCredits: "button", theme: "blue", accent: "theme", ratingSources: ["rt_critic", "rt_audience", "imdb", "tmdb"] }, "Preferences from earlier app versions receive safe defaults; auto-play off stays off");
+    subtitleColor: "white", subtitleBackground: "off", subtitleDelayMs: 0, directPlay: "auto", enhancedGraphics: false, saveHomeArtwork: false, artworkLimitMb: 10, saveLibraryArtwork: false, preloadArtwork: true, autoAdvanceFeatures: true, minBuffer: 1, skipIntro: "button", skipCredits: "button", theme: "blue", accent: "theme", autoOpenProfile: false, ratingSources: ["rt_critic", "rt_audience", "imdb", "tmdb"] }, "Preferences from earlier app versions receive safe defaults; auto-play off stays off");
 value = JSON.stringify({ quality: "720", language: "en", autoNext: true });
 assert.strictEqual(prefs.load(storage).nextEpisode, "countdown", "Auto-play on becomes the LG credits countdown");
 assert.strictEqual("autoNext" in prefs.load(storage), false);

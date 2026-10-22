@@ -205,6 +205,30 @@ body.playing {
     color: $text-secondary;
 }
 
+/* "Ends at 10:42 PM": the free space of the time row goes left of it, so it sits beside the remaining time. */
+.playback-ends {
+    margin: 0 24px 0 auto;
+    color: $text-secondary;
+}
+
+/* The seek preview frame above the timeline, centred on the target (js/preview-thumbs.js). */
+.preview-thumb {
+    position: absolute;
+    bottom: 28px;
+    width: 288px;
+    min-height: 162px;
+    margin-left: -144px;
+    border: 2px solid $text/0.6;
+    background: $canvas;
+    box-shadow: 0 8px 24px $shadow/0.55;
+    pointer-events: none;
+}
+
+.preview-thumb img {
+    display: block;
+    width: 100%;
+}
+
 .playback-progress {
     position: relative;
     height: 4px;
@@ -331,6 +355,20 @@ body.playing {
 .buffering-ring.buffering-spinner {
     -webkit-animation: vemm-spin 900ms linear infinite;
     animation: vemm-spin 900ms linear infinite;
+}
+
+/* Under the ring while the server is out of reach. */
+.reconnecting-note {
+    position: fixed;
+    top: 50%;
+    left: 0;
+    width: 100%;
+    margin: 96px 0 0;
+    font-size: 32px;
+    line-height: 40px;
+    text-align: center;
+    color: $text-strong;
+    pointer-events: none;
 }
 
 .buffering-percent {
@@ -1123,6 +1161,14 @@ input:focus {
 
 .settings-menu [aria-pressed="true"]::after {
     background: currentColor;
+}
+
+.settings-menu .menu-control.home-row-hidden {
+    opacity: 0.55;
+}
+
+.error-log .menu-control {
+    font-size: 22px;
 }
 
 .player-menu {

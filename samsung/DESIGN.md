@@ -114,7 +114,7 @@ Rationale, held by tests where it can be measured:
 | Guide and DVR | Provider selection, program rows, channel/date views, recording status and server-supplied preference fields |
 | Photos | Contained image above one grouped navigation/slideshow row |
 | Playback | Icon transport/progress overlay; grouped audio/subtitle choices and native tracks behind Device tracks; More and submenu return paths; five-second auto-hide |
-| Settings and diagnostics | Single-column value rows; quality/language alternatives on separate choice pages; privacy explanation in Diagnostics |
+| Settings and diagnostics | Single-column value rows; quality/language alternatives on separate choice pages; privacy explanation in Diagnostics; Home holds the launch-profile toggle and the per-profile Home rows list (Enter shows or hides, Reorder moves with Up/Down); Developer settings (error log, technical readouts, playback decisions in Stats for nerds) appear only after the code is typed on the About version line |
 | Confirmations and states | Explicit operation/item copy, confirmation and cancel; readable loading, empty and error/retry copy |
 
 ## Layout and input

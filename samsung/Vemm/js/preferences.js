@@ -51,6 +51,7 @@
         var saveLibraryArtwork = value && value.saveLibraryArtwork !== undefined ? value.saveLibraryArtwork : false;
         var autoAdvanceFeatures = value && value.autoAdvanceFeatures !== undefined ? value.autoAdvanceFeatures : true;
         var shownRatings = value && value.ratingSources !== undefined ? value.ratingSources : ratingSources;
+        var autoOpenProfile = value && value.autoOpenProfile !== undefined ? value.autoOpenProfile : false;
         var theme = value && value.theme !== undefined ? value.theme : "blue";
         var accent = value && value.accent !== undefined ? value.accent : "theme";
         // Builds before the Next episode choice saved only an on/off auto-play flag.
@@ -69,7 +70,7 @@
                 subtitleDelayMs < subtitleDelayMinMs || subtitleDelayMs > subtitleDelayMaxMs ||
                 directPlayModes.indexOf(directPlay) === -1 || typeof enhancedGraphics !== "boolean" ||
                 typeof saveHomeArtwork !== "boolean" || typeof saveLibraryArtwork !== "boolean" ||
-                typeof preloadArtwork !== "boolean" ||
+                typeof preloadArtwork !== "boolean" || typeof autoOpenProfile !== "boolean" ||
                 artworkLimits.indexOf(artworkLimitMb) === -1 || typeof autoAdvanceFeatures !== "boolean" ||
                 bufferSizes.indexOf(minBuffer) === -1 || skipModes.indexOf(skipIntro) === -1 ||
                 skipModes.indexOf(skipCredits) === -1 || themes.indexOf(theme) === -1 || accents.indexOf(accent) === -1 ||
@@ -86,7 +87,7 @@
             artworkLimitMb: artworkLimitMb, saveLibraryArtwork: saveLibraryArtwork,
             preloadArtwork: preloadArtwork,
             autoAdvanceFeatures: autoAdvanceFeatures, minBuffer: minBuffer, skipIntro: skipIntro, skipCredits: skipCredits,
-            theme: theme, accent: accent,
+            theme: theme, accent: accent, autoOpenProfile: autoOpenProfile,
             ratingSources: ratingSources.filter(function (source) { return shownRatings.indexOf(source) !== -1; }) };
     }
     return {

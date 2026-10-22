@@ -151,7 +151,7 @@ async function run() {
         });
     };
     ["js/plex-api.js", "js/avplay.js", "js/playback.js", "js/subtitles.js", "js/preferences.js",
-        "js/session.js", "js/recents.js", "js/home-hero.js", "js/item-menu.js", "js/skip-markers.js", "js/account-preferences.js", "js/file-info.js", "js/search-ui.js", "js/preload.js", "js/i18n.js", "main.js"].forEach(function (file) {
+        "js/session.js", "js/recents.js", "js/home-hero.js", "js/item-menu.js", "js/skip-markers.js", "js/account-preferences.js", "js/file-info.js", "js/search-ui.js", "js/preload.js", "js/dev-mode.js", "js/reconnect.js", "js/track-memory.js", "js/ends-at.js", "js/i18n.js", "main.js"].forEach(function (file) {
         window.eval(fs.readFileSync(path.join(app, file), "utf8"));
     });
     function click(text) {
@@ -852,6 +852,8 @@ async function run() {
         }).click();
         await settle();
         assert.strictEqual(mutations().length, 1, "Repeated confirmation must produce exactly one write");
+        assert(/Ends at [0-9]{1,2}:[0-9]{2} (AM|PM)/.test(window.document.querySelector(".detail-meta").textContent),
+            "The details page says when the movie would end if played now");
         click("More");
         click("Mark unwatched");
         click("Confirm mark unwatched");
@@ -957,6 +959,12 @@ async function run() {
         assert(!window.document.getElementById("player-menu"), "Back closes playback options");
         assert.strictEqual(window.document.activeElement, playerControls[moreIndex],
             "Back from playback options restores focus to More");
+        click("More");
+        click("Stats for nerds");
+        assert(window.document.getElementById("playback-stats").textContent.indexOf("Reason:") === -1,
+            "The decision explanation is a developer-mode readout");
+        click("Close");
+        window.localStorage.setItem("vemm-tizen-dev-mode", "1");
         click("More");
         click("Stats for nerds");
         var stats = window.document.getElementById("playback-stats");
@@ -1137,6 +1145,8 @@ async function run() {
         assert.strictEqual(nativeCalls.filter(function (call) { return call === "open"; }).length, opens,
             "Foregrounding must never start playback automatically");
         assert(window.document.querySelector(".synopsis"), "Foreground recovery must restore fresh details");
+        window.localStorage.removeItem("vemm-tizen-dev-mode");
+        window.localStorage.removeItem("vemm-tizen-error-log");
         assert.strictEqual(window.localStorage.length, 4,
             "Only the device identifier, explicitly saved preferences, recent searches and recent speed numbers are stored");
         assert(window.localStorage.getItem("vemm-tizen-recent-searches"));

@@ -737,6 +737,19 @@ subsequent direct-play need, so the feature costs zero extra round-trips.
   show returns `playQueueTotalCount: 1`, i.e. no successor. A movie behaves the same way.
 - The POST needs an `X-Plex-Client-Identifier`; without it PMS answers with an empty body.
 
+### Playlists (verified live)
+
+- `GET /playlists` lists them (`type: playlist`, `playlistType` `video`/`audio`/`photo`, `leafCount`, `duration`,
+  `composite` artwork); `GET /playlists/{id}` is the one playlist and `GET /playlists/{id}/items` its items in order,
+  paged like any container. `/library/metadata/{id}` does not answer for a playlist.
+- A video playlist plays through `POST /playQueues?type=video&playlistID={id}&shuffle=0|1&repeat=0&continuous=0`,
+  optionally `&key=/library/metadata/{ratingKey}` to start at one item (the queue still holds the whole playlist).
+  `shuffle=1` is shuffled by the server. The response is a **window**, not the whole queue: the selected item and
+  20 on each side (`playQueueTotalCount` is the real size).
+- `GET /playQueues/{id}?center={playQueueItemID}&window=20` returns the items around any queue item, so the app asks
+  for the next window while the second-to-last item of the current one plays.
+- Progress goes to `/:/timeline` with `playQueueID` and the current `playQueueItemID`, as for any queue.
+
 ### Show chain (verified against a show, ratingKey 1857)
 
 ```

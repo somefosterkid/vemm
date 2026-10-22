@@ -79,6 +79,8 @@
     var scrubTarget = null;
     var scrubRepeats = 0;
     var scrubTimer = null;
+    // Seek preview frames (js/preview-thumbs.js) of the playing title, or null.
+    var previewThumbs = null;
     var scrubOwner = null;
     // One seek runs at a time; presses while it lands queue the latest target (see seekToPlayer).
     var seekOwner = null;
@@ -89,6 +91,16 @@
     // then only records what to do once it moves (true pause, false play, null nothing asked; applyWantedPause).
     var pauseWanted = null;
     var playerStarting = false;
+    // Waiting for the server: `reconnect` after AVPlay lost the stream (reconnectPlayer), `stall` while it only
+    // buffers (watchStall). reconnectOpens counts reopens since playback last played on; reconnectFrom is where
+    // the latest one began; reconnectResume marks the next startPlayer as such a reopen.
+    var reconnect = null;
+    var stall = { timer: null, wait: null };
+    var reconnectOpens = 0;
+    var reconnectSince = 0;
+    var reconnectFrom = null;
+    var reconnectResume = false;
+    var progressNoted = false;
     var playerPanel = "";
     var playerPosition = 0;
     var playerDuration = 0;
@@ -103,6 +115,8 @@
     var externalCues = null;
     var musicQueue = null;
     var musicLoading = false;
+    var playlistQueue = null;
+    var playlistLoading = false;
     var queueShuffle = false;
     var queueRepeat = "off";
     var viewCleanup = null;
@@ -468,6 +482,7 @@
     function card(parent, item, client, siblings, options) {
         options = options || {};
         var node = button(parent, "", function () {
+            if (options.open) { options.open(item); return; }
             if (options.deck && preferences.continueAction === "play" &&
                     ["movie", "episode", "clip"].indexOf(item.type) !== -1) {
                 playFromCard(item, client, true);
@@ -481,7 +496,7 @@
                     openListing(item.parentTitle || item.title, function (offset) {
                         return client.getChildren(item.ratingKey, offset);
                     }, client, 0, null, null, item.parentRatingKey ? { showRatingKey: item.parentRatingKey } : null);
-                } else { openDetail(item.ratingKey, client); }
+                } else { openDetail(item.ratingKey, client, item.type === "playlist"); }
             });
         });
         node.className = "media-card";
@@ -492,7 +507,7 @@
         }
         var seriesPoster = options.shelf && item.type === "episode" && (item.grandparentThumb || item.parentThumb);
         node.setAttribute("data-shape", !seriesPoster && ["episode", "clip", "photo"].indexOf(item.type) !== -1 ? "landscape" :
-            ["artist", "album", "track"].indexOf(item.type) !== -1 ? "square" : "portrait");
+            ["artist", "album", "track", "playlist"].indexOf(item.type) !== -1 ? "square" : "portrait");
         node.vemmCard = { item: item, client: client, options: options };
         var image = element("img", "poster");
         image.alt = item.title || "Media";
@@ -515,7 +530,8 @@
             translate("{minutes} min left", { minutes: Math.max(1, Math.round((item.duration - item.viewOffset) / 60000)) }) : "";
         node.appendChild(element("span", "card-meta", options.sort && options.sort !== "titleSort" ?
             sortCardValue(item, options.sort) : item.type === "episode" ?
-            [episodeNumber, item.title, remaining].filter(Boolean).join(" · ") : remaining || String(item.year || "")));
+            [episodeNumber, item.title, remaining].filter(Boolean).join(" · ") : item.type === "playlist" ?
+            translate("{count} items", { count: item.leafCount || 0 }) : remaining || String(item.year || "")));
         if (item.viewCount) {
             var watchedMark = element("span", "card-watched", "✓");
             watchedMark.setAttribute("aria-label", translate("Watched"));
@@ -823,7 +839,14 @@
         if (node.vemmCard) { screen.className = "screen screen-home shelves-focused"; }
     }
 
+    // Developer mode only: the error log keeps what the app told the viewer went wrong.
+    function devMode() { return !!window.VemmDevMode && window.VemmDevMode.enabled(window.localStorage); }
+    function logError(message) {
+        if (window.VemmDevMode) { window.VemmDevMode.record(window.localStorage, message); }
+    }
+
     function setStatus(message, isError) {
+        if (isError && message) { logError(message); }
         var retry = Array.prototype.filter.call(screen.querySelectorAll("button"), function (control) {
             return /(?:^| )route-retry(?: |$)/.test(control.className);
         })[0];
@@ -956,6 +979,8 @@
 
     // The profile list opens with the most recently chosen profile focused.
     var LAST_PROFILE_KEY = "vemm-tizen-last-profile";
+    // Set at launch only: the first profile list opens the last profile itself when Settings asks for that.
+    var autoOpenPending = false;
 
     // Each profile may tint its icon; the choice lives on this TV only, keyed by profile uuid.
     var PROFILE_COLORS_KEY = "vemm-tizen-profile-colors";
@@ -1081,6 +1106,8 @@
         button(corner, "Sign out", function () { confirmDialog("Sign out of Plex on this TV?", "Cancel", "Sign out", signOut); });
         var message = typeof warning === "string" ? warning : "";
         if (message) { screen.appendChild(element("p", "inline-error", message)); }
+        var autoOpen = autoOpenPending && preferences.autoOpenProfile;
+        autoOpenPending = false;
         var body = group(screen, "", "profile-body");
         var editButton = null;
         var drawn = rememberedProfiles();
@@ -1172,7 +1199,19 @@
                 else { (identities.querySelector("button") || editButton).focus(); }
             }
         }
-        if (drawn) { draw(drawn); }
+        // Choosing the last profile for the viewer: a PIN-protected one still asks for its PIN, and one that is gone leaves the list.
+        function openLast() {
+            if (!autoOpen) { return; }
+            autoOpen = false;
+            var wanted = "";
+            try { wanted = window.localStorage.getItem(LAST_PROFILE_KEY) || ""; } catch (error) { wanted = ""; }
+            Array.prototype.some.call(body.querySelectorAll(".identity-choice"), function (node) {
+                if (!wanted || node.vemmProfile !== wanted) { return false; }
+                node.click();
+                return true;
+            });
+        }
+        if (drawn) { draw(drawn); openLast(); }
         setStatus(drawn ? message : "Loading Plex Home profiles...", !!(drawn && message));
         accountClient.getProfiles().then(function (profiles) {
             if (generation !== viewGeneration) { return; }
@@ -1182,6 +1221,7 @@
                 drawnJson = profilesJson(fresh);
                 draw(fresh);
             }
+            openLast();
             if (message) { setStatus(message, true); }
             else if (profilesEditing) { setStatus("Choose a profile to change its colour."); }
             else { setStatus(""); }
@@ -1235,6 +1275,11 @@
     function homeKey(serverId) {
         var profile = activeProfile || linkedProfile;
         return HOME_PREFIX + String(profile && profile.uuid || "linked") + "-" + serverId;
+    }
+    // The shelves the viewer hid or reordered for this profile and server (Settings > Home).
+    function homeRowsKey() {
+        var profile = activeProfile || linkedProfile;
+        return window.VemmHomeRows.key(profile && profile.uuid, currentServerId);
     }
     function pick(source, fields) {
         var out = {};
@@ -1842,6 +1887,9 @@
             return !favorites || hub.librarySectionID === undefined ||
                 favorites.indexOf(String(hub.librarySectionID)) !== -1;
         });
+        if (window.VemmHomeRows && currentServerId) {
+            visibleHubs = window.VemmHomeRows.visible(visibleHubs, window.VemmHomeRows.load(window.localStorage, homeRowsKey()));
+        }
         var features = window.VemmHomeHero.pick(visibleHubs, 8);
         if (features.length) {
             var featuredIndex = 0;
@@ -2039,6 +2087,7 @@
             choice.className += " library-button";
             if (selected && String(selected.key) === String(section.key)) { choice.setAttribute("aria-current", "page"); }
         });
+        button(nav, "Playlists", function () { visit(openPlaylists); });
         button(nav, "Search", function () { visit(openSearch); });
         header.appendChild(nav);
         screen.appendChild(header);
@@ -2506,7 +2555,7 @@
             var list = element("div", "item-list");
             screen.appendChild(list);
             if (!items.length) { list.appendChild(element("p", "empty-state", translate("No available items in this view."))); }
-            items.forEach(function (item) { if (item.ratingKey) { card(list, item, client, items, { library: true }); } });
+            items.forEach(function (item) { if (item.ratingKey) { card(list, item, client, items, { library: true, open: navigation && navigation.open }); } });
             var next = offset + (container.Metadata || []).length;
             if (container.totalSize > next && next > offset) {
                 button(screen, "Load more", function () {
@@ -3092,8 +3141,8 @@
         if (typeof savedQuery === "string" && savedQuery) { keyboard.set(savedQuery); renderRecents(); search(); }
     }
 
-    function openDetail(id, client) {
-        retryView = function () { openDetail(id, client); };
+    function openDetail(id, client, playlist) {
+        retryView = function () { openDetail(id, client, playlist); };
         restoreView = retryView;
         var generation = ++viewGeneration;
         clear(screen);
@@ -3102,13 +3151,13 @@
         button(screen, "Back", backView);
         setStatus("Loading details...");
         focusLoading();
-        client.getMetadata(id).then(function (item) {
+        (playlist ? client.getPlaylist(id) : client.getMetadata(id)).then(function (item) {
             if (generation !== viewGeneration) { return; }
             if (!item) { throw new Error("This item is no longer on the server."); }
             renderDetail(item, client);
         }).catch(function (error) {
             if (generation !== viewGeneration) { return; }
-            button(screen, "Retry details", function () { openDetail(id, client); });
+            button(screen, "Retry details", function () { openDetail(id, client, playlist); });
             setStatus(errorText(error), true);
             focusFirst();
         });
@@ -3148,7 +3197,7 @@
         clear(screen);
         viewClients.push(client);
         resetImages();
-        restoreView = function () { openDetail(item.ratingKey, client); };
+        restoreView = function () { openDetail(item.ratingKey, client, item.type === "playlist"); };
         setDetailMode(true);
         screen.className = "screen screen-detail";
         var playable = ["movie", "episode", "clip", "track"].indexOf(item.type) !== -1;
@@ -3168,13 +3217,13 @@
         var hero = element("section", "detail-hero");
         var main = element("div", "detail-main");
         hero.appendChild(main);
-        if (["artist", "album", "track", "photoalbum", "collection"].indexOf(item.type) !== -1) {
+        if (["artist", "album", "track", "photoalbum", "collection", "playlist"].indexOf(item.type) !== -1) {
             hero.className += " detail-hero-with-cover";
             var cover = element("img", "detail-cover");
             cover.alt = "";
             cover.src = placeholderArt();
             hero.appendChild(cover);
-            queueImage(cover, client, item.thumb, { width: 480, height: 480 });
+            queueImage(cover, client, item.thumb || item.composite, { width: 480, height: 480 });
         }
         if (item.type === "episode" && item.grandparentTitle) {
             main.appendChild(element("p", "detail-eyebrow", item.grandparentTitle +
@@ -3207,8 +3256,11 @@
         var year = item.year || (item.originallyAvailableAt ? String(item.originallyAvailableAt).slice(0, 4) : "");
         var remaining = item.viewOffset && item.duration ? Math.max(1, Math.round((item.duration - item.viewOffset) / 60000)) : 0;
         main.appendChild(element("p", "detail-meta", [year, item.contentRating,
+            item.type === "playlist" ? translate("{count} items", { count: item.leafCount || 0 }) : "",
             item.duration ? durationLabel(item.duration) : "",
-            remaining ? translate("{minutes} min left", { minutes: remaining }) : item.viewCount ? translate("Watched") : ""
+            remaining ? translate("{minutes} min left", { minutes: remaining }) : item.viewCount ? translate("Watched") : "",
+            item.duration && (item.type === "movie" || item.type === "episode") ?
+                endsAtLabel(item.duration - (item.viewOffset || 0)) : ""
         ].filter(Boolean).join("  ·  ")));
         var scores = window.PlexApi.ratingBadges(item, preferences.ratingSources);
         if (scores.length) {
@@ -3360,6 +3412,16 @@
                 "detail-pill detail-primary detail-pill-play";
             detailAction(actions, "Shuffle album", "shuffle", function () { startAlbum(item, client, true); });
         }
+        if (item.type === "playlist") {
+            var listKind = window.VemmPlaylists.kind(item);
+            if (listKind === "video" || listKind === "audio") {
+                detailAction(actions, "Play", "play", function () { startPlaylist(item, client, false); }).className =
+                    "detail-pill detail-primary detail-pill-play";
+                detailAction(actions, "Shuffle", "shuffle", function () { startPlaylist(item, client, true); });
+            }
+            var listed = detailAction(actions, "Items", "list", function () { visit(function () { openPlaylistItems(item, client); }); });
+            if (listKind !== "video" && listKind !== "audio") { listed.className = "detail-pill detail-primary detail-pill-list"; }
+        }
         if (item.type === "photo") {
             detailAction(actions, "View photo", "play", function () { visit(function () { openPhotos([item], 0, client); }); }).className =
                 "detail-pill detail-primary detail-pill-play";
@@ -3415,7 +3477,7 @@
                 });
             });
         }
-        detailAction(more, "Related titles", "", function () {
+        if (item.type !== "playlist") { detailAction(more, "Related titles", "", function () {
             visit(function () {
                 openListing("Related titles", function () {
                     return client.getRelated(item.ratingKey).then(function (container) {
@@ -3425,7 +3487,7 @@
                     });
                 }, client);
             });
-        });
+        }); }
         var moreButton = detailAction(actions, "More", "more", function () {
             more.hidden = !more.hidden;
             moreButton.setAttribute("aria-expanded", String(!more.hidden));
@@ -3434,6 +3496,7 @@
         moreButton.className += " round-control";
         moreButton.setAttribute("aria-label", translate("More"));
         moreButton.setAttribute("aria-expanded", "false");
+        if (item.type === "playlist") { actions.removeChild(moreButton); }
         main.appendChild(more);
 
         var directors = (item.Director || []).slice(0, 2).map(function (person) { return person.tag; }).filter(Boolean);
@@ -3584,6 +3647,30 @@
         return null;
     }
 
+    // The TV's screensaver stays off while the picture plays and is back at its default whenever it does not.
+    function keepScreenAwake(awake) {
+        if (window.VemmScreensaver) { window.VemmScreensaver.keepAwake(awake); }
+    }
+
+    // "Ends at 10:42 PM" for something with remaining ms left, by the TV's clock; "" when unknown.
+    function endsAtLabel(remaining) {
+        return window.VemmEndsAt && remaining > 0 ?
+            translate("Ends at {time}", { time: window.VemmEndsAt.time(remaining, preferences.language) }) : "";
+    }
+
+    function showPreview(position, duration) {
+        var progress = document.getElementById("playback-progress");
+        if (previewThumbs && progress && duration > 0) { previewThumbs.show(position, position / duration, progress); }
+    }
+
+    function hidePreview() {
+        if (previewThumbs) { previewThumbs.hide(); }
+    }
+
+    function closePreview() {
+        if (previewThumbs) { previewThumbs.close(); previewThumbs = null; }
+    }
+
     // Draws the clocks and the timeline at position. The bar and its scrubber move by transform
     // only, so a time update is a compositor move with no layout.
     function showPlayhead(position, duration) {
@@ -3592,6 +3679,8 @@
         var progress = document.getElementById("playback-progress");
         if (elapsed) { elapsed.textContent = timeLabel(position); }
         if (remaining) { remaining.textContent = playerRemaining(position, duration); }
+        var ends = document.querySelector && document.querySelector(".playback-ends");
+        if (ends) { ends.textContent = endsAtLabel(duration - position); }
         if (!progress || !(duration > 0)) { return; }
         progress.setAttribute("aria-valuemax", String(duration));
         progress.setAttribute("aria-valuenow", String(Math.round(position)));
@@ -3869,18 +3958,21 @@
         var snapshot = player.snapshot();
         var quality = player.quality();
         var decision = quality.explanation || {};
+        var developer = devMode();
         [
-            translate("Playback") + ": " + modeName(quality.mode),
+            translate("Playback") + ": " + modeName(quality.mode)
+        ].concat(developer ? [
             translate("Reason") + ": " + reasonName(decision.reason),
             translate("Fallback") + ": " + fallbackName(decision.fallback),
-            translate("Capability evidence") + ": " + capabilityName(decision.capability),
+            translate("Capability evidence") + ": " + capabilityName(decision.capability)
+        ] : [], [
             translate("Position") + ": " + timeLabel(snapshot.position) + " / " + timeLabel(snapshot.duration),
             translate("Video") + ": " + qualityLabel(quality.mode === "direct" ? quality.source : quality.stream),
             translate("Quality") + ": " + qualityChoiceName(quality.limit, quality.source || {},
                 qualityTop(quality.source, quality.mode === "direct")),
             translate("State") + ": " + translate(snapshot.state)
-        ].concat(bufferStats()).forEach(function (line, index) {
-            stats.appendChild(element("p", index === 4 ? "playback-stats-position" : "", line));
+        ], developer ? bufferStats() : []).forEach(function (line) {
+            stats.appendChild(element("p", line.indexOf(translate("Position") + ": ") === 0 ? "playback-stats-position" : "", line));
         });
         // Refreshed every few seconds for as long as the panel is open.
         var device = element("div", "playback-stats-device");
@@ -3891,11 +3983,11 @@
                 lines.forEach(function (line) { device.appendChild(element("p", "", line)); });
             });
         }
-        refreshDevice();
+        if (developer) { refreshDevice(); }
         stopStatsTimer();
-        statsTimer = setInterval(function () {
+        if (developer) { statsTimer = setInterval(function () {
             if (document.getElementById("playback-stats")) { refreshDevice(); } else { stopStatsTimer(); }
-        }, 2500);
+        }, 2500); }
         button(stats, "Close", function () {
             stopStatsTimer();
             if (stats.parentNode) { stats.parentNode.removeChild(stats); }
@@ -3908,7 +4000,8 @@
     }
 
     function showUpNext(watchCredits) {
-        if (!player || playerItem.type !== "episode" || !playerClient.nextEpisode) { return null; }
+        var listQueue = activePlaylist();
+        if (!player || !listQueue && (playerItem.type !== "episode" || !playerClient.nextEpisode)) { return null; }
         closeUpNext();
         var generation = upNextGeneration;
         var panel = element("section", "up-next-card");
@@ -3924,7 +4017,7 @@
         var card = element("div", "up-next-pending", translate("Loading next episode..."));
         panel.appendChild(card);
         screen.appendChild(panel);
-        playerClient.nextEpisode(playerItem).then(function (next) {
+        (listQueue ? Promise.resolve(queueSuccessor(listQueue)) : playerClient.nextEpisode(playerItem)).then(function (next) {
             if (generation !== upNextGeneration || !panel.parentNode || !next) { return; }
             clear(card);
             card.className = "up-next-pending";
@@ -4044,6 +4137,102 @@
         focusFirst();
     }
 
+    var RECONNECT_MS = 120000;
+    var RECONNECT_REOPENS = 3;
+    var STALL_MS = 6000;
+
+    function showReconnecting(on) {
+        var note = document.getElementById("reconnecting-note");
+        if (!on) {
+            if (note && note.parentNode) { note.parentNode.removeChild(note); }
+            return;
+        }
+        if (note) { return; }
+        // Reports failing are part of this, not news of their own.
+        if (progressNoted) { progressNoted = false; setStatus(""); }
+        note = element("p", "reconnecting-note", translate("Reconnecting..."));
+        note.id = "reconnecting-note";
+        note.setAttribute("role", "status");
+        screen.appendChild(note);
+    }
+
+    // A start that failed without a word from Plex (no HTTP status) and not for a reason AVPlay names as the file's
+    // own (unsupported, invalid): the connection again, so worth waiting for.
+    function connectionFailure(error) {
+        if (!error || error.status || error.code === "cancelled") { return false; }
+        if (/^avplay-/.test(String(error.code || "")) && error.code !== "avplay-prepare-timeout") {
+            return error.reason === "PLAYER_ERROR_CONNECTION_FAILED";
+        }
+        return true;
+    }
+
+    function endStallWatch() {
+        if (stall.timer !== null) { clearTimeout(stall.timer); stall.timer = null; }
+        if (stall.wait) { stall.wait.cancel(); stall.wait = null; showReconnecting(false); }
+    }
+
+    function cancelReconnect() {
+        endStallWatch();
+        if (reconnect) { reconnect.cancel(); reconnect = null; }
+        showReconnecting(false);
+    }
+
+    // AVPlay waiting for over 6 s while the server does not answer reads as Reconnecting instead of a bare
+    // percent. AVPlay gives up on its own after about half a minute, which reconnectPlayer then handles.
+    function watchStall(buffering, owner) {
+        if (!buffering) { endStallWatch(); return; }
+        if (stall.timer !== null || stall.wait || reconnect) { return; }
+        stall.timer = setTimeout(function () {
+            stall.timer = null;
+            if (player !== owner || playerClosing || !hudBuffering) { return; }
+            var client = playerClient;
+            stall.wait = window.VemmReconnect.create({
+                limit: Infinity,
+                probe: function () { return client.identity(); },
+                onWait: function () { showReconnecting(true); },
+                onUp: function () { stall.wait = null; showReconnecting(false); },
+                onGiveUp: function () { /* never: the limit is endless */ }
+            });
+            stall.wait.start();
+        }, STALL_MS);
+    }
+
+    // AVPlay lost the connection mid-playback. Calm state with a spinner while the server is asked again (1, 2, 4,
+    // then every 8 s); once it answers, the title opens again where it stopped, as a Retry would. After about two
+    // minutes, or three reopens that never played on (a bad file), the usual problem panel takes over.
+    function reconnectPlayer(detail, pause) {
+        var owner = player;
+        if (!owner || playerClosing) { return; }
+        cancelReconnect();
+        if (reconnectOpens >= RECONNECT_REOPENS) { showPlayerError({ message: detail }); return; }
+        if (!reconnectOpens) { reconnectSince = Date.now(); }
+        var client = playerClient;
+        setBufferRing(true);
+        showReconnecting(true);
+        showHud();
+        reconnect = window.VemmReconnect.create({
+            limit: Math.max(0, RECONNECT_MS - (Date.now() - reconnectSince)),
+            probe: function () { return client.identity(); },
+            onUp: function () {
+                reconnect = null;
+                if (player !== owner || playerClosing) { return; }
+                reconnectOpens += 1;
+                reconnectResume = true;
+                recoverPlayer(false);
+                // Closing the lost stream asks the server and may take a moment: the spinner stays up meanwhile.
+                setBufferRing(true);
+                showReconnecting(true);
+            },
+            onGiveUp: function () {
+                reconnect = null;
+                if (player !== owner || playerClosing) { return; }
+                showReconnecting(false);
+                showPlayerError(new Error(translate("Plex could not be reached. Check the network and retry.")));
+            }
+        });
+        reconnect.start(pause);
+    }
+
     function recoverPlayer(restart) {
         if (!player || playerClosing || !playerSettings) { return; }
         var failedPlayer = player;
@@ -4064,6 +4253,8 @@
 
     function showPlayerError(error) {
         dropStill();
+        cancelReconnect();
+        keepScreenAwake(false);
         var message = errorText(error) || translate("Playback failed. Stop and retry.");
         setStatus(message, true);
         setBufferRing(null);
@@ -4232,12 +4423,55 @@
         focusFirst();
     }
 
+    // The play queue of the playlist being played, if any.
+    function activePlaylist() {
+        var queue = playerSettings && playerSettings.playQueue;
+        return queue && queue.playlist ? queue : null;
+    }
+
+    function openPlaylists() {
+        openListing("Playlists", function (offset) { return currentClient.getPlaylists(offset); }, currentClient);
+    }
+
+    // Choosing an item of a video playlist plays the playlist from that item.
+    function openPlaylistItems(playlist, client) {
+        var video = window.VemmPlaylists.kind(playlist) === "video";
+        openListing(playlist.title, function (offset) { return client.getPlaylistItems(playlist.ratingKey, offset); }, client, 0, null, null,
+            { open: video ? function (entry) { startPlaylist(playlist, client, false, entry); } : null });
+    }
+
+    function startPlaylist(playlist, client, shuffle, first) {
+        if (playlistLoading || player || playerClosing) { return; }
+        if (window.VemmPlaylists.kind(playlist) === "audio") { startAlbum(playlist, client, shuffle); return; }
+        playlistLoading = true;
+        var generation = viewGeneration;
+        setStatus(translate("Loading playlist..."));
+        // A manually entered server has no remembered id; the server states its own.
+        (currentServerId ? Promise.resolve(currentServerId) : client.identity().then(function (identity) {
+            return identity.machineIdentifier;
+        })).then(function (machineId) {
+            return client.createPlaylistPlayQueue(machineId, playlist.ratingKey, shuffle, first && first.ratingKey);
+        }).then(function (queue) {
+            var at = window.VemmPlaylists.selectedIndex(queue);
+            if (at < 0) { throw new Error("This playlist has no available items."); }
+            queue.playlist = String(playlist.ratingKey);
+            return client.getMetadata(queue.items[at].ratingKey).then(function (metadata) {
+                if (generation === viewGeneration && !player) {
+                    playlistQueue = queue;
+                    startPlayer(metadata, client, metadata.viewOffset || 0);
+                }
+            });
+        }).catch(function (error) {
+            if (generation === viewGeneration) { setStatus(errorText(error), true); }
+        }).then(function () { playlistLoading = false; });
+    }
+
     function startAlbum(item, client, shuffle) {
         if (musicLoading || player || playerClosing) { return; }
         musicLoading = true;
         var generation = viewGeneration;
         setStatus(translate("Loading music queue..."));
-        client.getTracks(item.ratingKey).then(function (tracks) {
+        client.getTracks(item.ratingKey, item.type === "playlist").then(function (tracks) {
             if (generation !== viewGeneration || player) { return; }
             musicQueue = window.VemmQueue.create(tracks);
             queueShuffle = shuffle;
@@ -4279,6 +4513,8 @@
 
     function showHud() {
         cancelHudTimer();
+        // The end time moves while paused or stalled, so it is recomputed whenever the HUD shows.
+        if (player && !playerClosing) { updatePlayerClocks(playerPosition, playerDuration); }
         var hud = screen.querySelector(".player-hud");
         var shell = document.querySelector(".app-shell");
         if (hud) { hud.hidden = false; }
@@ -4924,7 +5160,7 @@
             preload.arm(function () {
                 var loading = !player && !playerClosing && !document.hidden && window.webapis && window.webapis.avplay && load();
                 return loading && loading.then(function (target) {
-                    if (!target || player || playerClosing) { return null; }
+                    if (!target || player || playerClosing || rememberedTracks(target.item, 0)) { return null; }
                     var pipeline = playbackPipeline(target.item, client, playbackSettings(target.offset, 0));
                     pipeline.ready = pipeline.session.prepare();
                     pipeline.discard = function () { pipeline.session.stop().catch(function () { /* nothing to report */ }); };
@@ -4959,7 +5195,21 @@
     }
 
     function startPlayer(item, client, offset, mediaIndex, trackOptions) {
+        var listQueue = playlistQueue;
+        playlistQueue = null;
         if (player || playerClosing) { return; }
+        var reopened = reconnectResume;
+        reconnectResume = false;
+        if (!reopened) { reconnectOpens = 0; }
+        reconnectFrom = reopened ? offset : null;
+        if (!trackOptions || trackOptions.audioId === undefined && trackOptions.subtitleId === undefined) {
+            // Another episode of a show whose tracks the viewer picked before.
+            var remembered = rememberedTracks(item, mediaIndex);
+            if (remembered) {
+                var own = trackOptions || {};
+                trackOptions = { audioId: remembered.audioId, subtitleId: remembered.subtitleId, cues: own.cues, paused: own.paused };
+            }
+        }
         var settings = playbackSettings(offset, mediaIndex, trackOptions);
         // The background start of exactly this, if there is one; any other is discarded here.
         var pipeline = preload.take(preloadKey(item, settings));
@@ -4978,6 +5228,8 @@
         // A spinner, not a percent, until the picture moves: AVPlay reports one fill while it
         // prepares and another after the resume seek, so a percent jumped and then stalled.
         setBufferRing(true);
+        // A reopen after a drop keeps saying so until the picture moves.
+        if (reopened) { showReconnecting(true); }
         hudFocus = null;
         scrubReturnFocus = null;
         playerPanel = "";
@@ -4988,7 +5240,22 @@
         playerPosition = offset || 0;
         playerDuration = item.duration || 0;
         playerSettings = pipeline ? pipeline.settings : settings;
+        if (listQueue) {
+            playerSettings.playQueue = listQueue;
+            if (window.VemmPlaylists.needsMore(listQueue)) {
+                client.getPlayQueueItems(listQueue.id, listQueue.itemId).then(function (items) {
+                    listQueue.items = items;
+                }).catch(function () { /* the next item is looked up again when this one ends */ });
+            }
+        }
         externalCues = trackOptions && trackOptions.cues || null;
+        closePreview();
+        var previewMedia = item.Media && item.Media[playerSettings.mediaIndex || 0];
+        var previewPart = previewMedia && previewMedia.Part && previewMedia.Part[0];
+        if (previewPart && previewPart.id && (item.type === "movie" || item.type === "episode") &&
+                client.previewIndex && window.VemmPreviewThumbs) {
+            previewThumbs = window.VemmPreviewThumbs.create({ load: function () { return client.previewIndex(previewPart.id); } });
+        }
         document.body.className = held ? "playing holding-page" : "playing";
         var hud = element("section", "player-hud");
         hud.appendChild(element("h2", "", item.title || "Playing"));
@@ -4999,6 +5266,9 @@
         var elapsed = element("span", "playback-elapsed", timeLabel(playerPosition));
         elapsed.id = "playback-time";
         time.appendChild(elapsed);
+        if (item.type === "movie" || item.type === "episode") {
+            time.appendChild(element("span", "playback-ends", endsAtLabel(playerDuration - playerPosition)));
+        }
         time.appendChild(element("span", "playback-remaining", playerRemaining(playerPosition, playerDuration)));
         hud.appendChild(time);
         var progress = element("div", "playback-progress");
@@ -5086,7 +5356,8 @@
             skip.control = control;
             // LG's Up Next: on the final credits marker of an episode, a 10 second countdown
             // that finishes the episode and starts its successor unless the viewer acts.
-            if (next.action === "finish" && item.type === "episode" && preferences.nextEpisode === "countdown" &&
+            if (next.action === "finish" && (activePlaylist() ? queueSuccessor(activePlaylist()) : item.type === "episode") &&
+                    preferences.nextEpisode === "countdown" &&
                     !document.hidden) {
                 var remaining = 10;
                 var tick = null;
@@ -5134,6 +5405,8 @@
             if (startup.done) { return; }
             startup.done = true;
             playerStarting = false;
+            showReconnecting(false);
+            if (previewThumbs) { previewThumbs.load(); }
             dropStill();
             if (!hudBuffering) { setBufferRing(null); }
             applyWantedPause();
@@ -5158,6 +5431,10 @@
                         showHud();
                     }
                     updatePlayerClocks(event.position, event.duration || item.duration);
+                    if (reconnectFrom !== null && event.position > reconnectFrom + 10000) {
+                        reconnectOpens = 0;
+                        reconnectFrom = null;
+                    }
                     if (startup.started && event.position !== startup.position) { endStartup(); }
                     updateSkip(event.position);
                     if (externalCues) {
@@ -5177,6 +5454,7 @@
                     }
                 } else if (event.type === "buffering") {
                     hudBuffering = !!event.detail;
+                    watchStall(hudBuffering, ownPlayer);
                     if (startup.done) {
                         setBufferRing(event.detail ? 0 : seekOwner === ownPlayer && seekInFlight !== null ? true : null);
                     }
@@ -5187,13 +5465,15 @@
                         setBufferRing(event.detail);
                     }
                 } else if (event.type === "state") {
+                    keepScreenAwake(event.state === "playing");
                     showPaused(pauseWanted !== null ? pauseWanted : event.state === "paused");
                     showHud();
                 } else if (event.type === "resume-failed") {
                     setStatus("Couldn't return to where you left off. Playing from the start.");
                     showHud();
                 } else if (event.type === "error") {
-                    showPlayerError({ message: event.detail });
+                    if (event.reason === "PLAYER_ERROR_CONNECTION_FAILED") { reconnectPlayer(event.detail); }
+                    else { showPlayerError({ message: event.detail }); }
                 } else if (event.type === "ended") {
                     finishEpisode();
                 }
@@ -5203,11 +5483,19 @@
                     setStatus("This TV could not play the original file. Asking Plex to convert it...");
                 }
                 if (event.type === "progress-error" || event.type === "cleanup-error") {
-                    if (player === ownPlayer) { setStatus(errorText(event), true); }
+                    // While the server is out of reach every report fails: that is the reconnecting note's news.
+                    if (player === ownPlayer && !reconnect && !stall.wait) {
+                        setStatus(errorText(event), true);
+                        progressNoted = progressNoted || event.type === "progress-error";
+                    }
+                }
+                if (event.type === "progress-restored" && progressNoted) {
+                    progressNoted = false;
+                    if (player === ownPlayer) { setStatus(""); }
                 }
             };
             ownPlayer = pipeline.session;
-            if ((item.type === "movie" || item.type === "episode") && currentServerId &&
+            if ((item.type === "movie" || item.type === "episode") && !listQueue && currentServerId &&
                     client === currentClient && client.createVideoPlayQueue) {
                 var queueSettings = playerSettings;
                 client.createVideoPlayQueue(currentServerId, item.ratingKey).then(function (queue) {
@@ -5224,7 +5512,13 @@
                     showHud();
                 }
             }).catch(function (error) {
-                if (player === ownPlayer) { showPlayerError(error); }
+                if (player !== ownPlayer) { return; }
+                // A reopen after a drop that fails without an answer from Plex is the connection again: wait on.
+                // It does not count as a try that played, and the next one waits a little.
+                if (reopened && connectionFailure(error)) {
+                    reconnectOpens = Math.max(0, reconnectOpens - 1);
+                    reconnectPlayer(errorText(error), 3000);
+                } else { showPlayerError(error); }
             });
         } catch (error) {
             document.body.className = "";
@@ -5258,7 +5552,7 @@
     }
 
     function togglePlayer() {
-        if (!player) { return; }
+        if (!player || reconnect) { return; }
         if (playerWaiting()) {
             pauseWanted = !wantsPause();
             showPaused(pauseWanted);
@@ -5282,7 +5576,7 @@
     // after the last one (commitScrub), so +10 +10 +10 is one 30 s seek. AVPlay cannot cancel a running
     // seek, and each seek waits for the minimum buffer, so every extra one used to cost a full seek.
     function seekPlayer(delta) {
-        if (!player) { return; }
+        if (!player || reconnect) { return; }
         moveScrub(delta);
     }
 
@@ -5314,6 +5608,7 @@
                 return;
             }
             if (!hudBuffering) { setBufferRing(null); }
+            hidePreview();
             // The clock shows where the seek landed: AVPlay snaps to a keyframe.
             updatePlayerClocks(position, playerDuration);
             applyWantedPause();
@@ -5321,6 +5616,7 @@
         }).catch(function (error) {
             if (player !== selectedPlayer || playerClosing) { return; }
             seekInFlight = null; queuedSeek = null;
+            hidePreview();
             applyWantedPause();
             if (!hudBuffering) { setBufferRing(null); }
             // A timed-out seek can still land later; the time handler then closes this problem.
@@ -5339,6 +5635,7 @@
         var owner = scrubOwner;
         cancelScrub();
         if (target !== null && player === owner && !playerClosing) { seekToPlayer(target); }
+        else { hidePreview(); }
     }
 
     // Moves the pending seek target (starting from where the playhead is headed) and restarts the 0.4 s wait.
@@ -5351,6 +5648,7 @@
         var duration = snapshot.duration || playerItem.duration || 0;
         scrubTarget = Math.max(0, Math.min(duration, scrubTarget + delta));
         showPlayhead(scrubTarget, duration || 1);
+        showPreview(scrubTarget, duration);
         if (scrubTimer !== null) { clearTimeout(scrubTimer); }
         scrubTimer = setTimeout(commitScrub, 400);
         return true;
@@ -5368,7 +5666,10 @@
         playerClosing = true;
         playerStarting = false;
         pauseWanted = null;
+        cancelReconnect();
         cancelScrub();
+        closePreview();
+        keepScreenAwake(false);
         subtitleSearchGeneration += 1;
         cancelHudTimer();
         setBufferRing(null);
@@ -5409,12 +5710,38 @@
     // Restart playback at the current position with an explicit track choice. `cues` keeps an
     // app-rendered text overlay; only "Subtitles off" may send subtitleStreamID=0, because moving
     // the PMS selection off a downloaded subtitle deletes it (docs/pms-api.md section 8).
+    // The audio/subtitle language a viewer picked is kept for the show on this TV (js/track-memory.js) and chosen
+    // again in its other episodes that have it; a movie keeps what Plex remembers for its file.
+    function trackMemoryShow(item) {
+        return item && item.type === "episode" && item.grandparentRatingKey ? String(item.grandparentRatingKey) : "";
+    }
+    function mediaStreams(item, mediaIndex) {
+        var media = (item.Media || [])[mediaIndex || 0];
+        return media && media.Part && media.Part[0] && media.Part[0].Stream || [];
+    }
+    function rememberedTracks(item, mediaIndex) {
+        var show = trackMemoryShow(item);
+        if (!show || !window.VemmTrackMemory) { return null; }
+        return window.VemmTrackMemory.choose(window.VemmTrackMemory.recall(window.localStorage, show), mediaStreams(item, mediaIndex));
+    }
+    function rememberTracks(item, mediaIndex, change) {
+        var show = trackMemoryShow(item);
+        if (show && window.VemmTrackMemory) {
+            window.VemmTrackMemory.remember(window.localStorage, show, mediaStreams(item, mediaIndex), change);
+        }
+    }
+
     function reloadTracks(audioId, subtitleId, cues, subtitleSidecar) {
         if (!player) { return; }
         var item = playerItem;
         var client = playerClient;
         var position = player.snapshot().position;
         var version = playerSettings.mediaIndex;
+        var now = player.selection();
+        rememberTracks(item, version, {
+            audioId: audioId !== undefined && String(audioId) !== String(now.audioId) ? audioId : undefined,
+            subtitleId: subtitleId !== undefined && String(subtitleId) !== String(now.subtitleId) ? subtitleId : undefined
+        });
         var options = { audioId: audioId, subtitleId: subtitleId, paused: wantsPause(),
             subtitleSidecar: cues ? (subtitleSidecar === undefined ?
                 playerSettings.subtitleSidecar : !!subtitleSidecar) : false };
@@ -5629,6 +5956,14 @@
         if (!language && preferred && other.length) {
             subList(button(menu, "Other languages", function () { openTracks(type, "__other_languages"); }, false, "language"));
         }
+        var rememberedShow = trackMemoryShow(playerItem);
+        if (rememberedShow && window.VemmTrackMemory && window.VemmTrackMemory.recall(window.localStorage, rememberedShow)) {
+            button(menu, "Reset to default tracks", function () {
+                window.VemmTrackMemory.forget(window.localStorage, rememberedShow);
+                setStatus("Other episodes of this show use the default tracks.");
+                openTracks(type, language);
+            });
+        }
         if (!language && type === "subtitle" && !streams.length) {
             menu.appendChild(element("p", "help-text", translate("No subtitle tracks are available.")));
         }
@@ -5716,11 +6051,12 @@
         var item = playerItem;
         var client = playerClient;
         var queue = playerSettings && playerSettings.playQueue;
+        function nextQueue(next) { return queue && queue.playlist ? window.VemmPlaylists.advance(queue, next) : null; }
         stopPlayer(function () {
             renderDetail(item, client);
             var generation = viewGeneration;
             var successor = suppliedSuccessor || queueSuccessor(queue);
-            (successor ? Promise.resolve(successor) : client.nextEpisode(item)).then(function (next) {
+            (successor || queue && queue.playlist ? Promise.resolve(successor) : client.nextEpisode(item)).then(function (next) {
                 if (!next || player || playerItem !== item || generation !== viewGeneration) { return; }
                 button(screen, translate("Up Next: {title}", { title: next.title }), function () {
                     if (nextTimer !== null) { clearTimeout(nextTimer); nextTimer = null; }
@@ -5728,14 +6064,14 @@
                 });
                 if (startNow === true && !document.hidden) {
                     client.getMetadata(next.ratingKey).then(function (metadata) {
-                        if (generation === viewGeneration && !player) { startPlayer(metadata, client, 0); }
+                        if (generation === viewGeneration && !player) { playlistQueue = nextQueue(next); startPlayer(metadata, client, 0); }
                     }).catch(showPlayerError);
                 } else if (preferences.nextEpisode !== "off" && !document.hidden) {
                     setStatus("Next episode starts in 10 seconds. Back cancels.");
                     nextTimer = setTimeout(function () {
                         nextTimer = null;
                         client.getMetadata(next.ratingKey).then(function (metadata) {
-                            if (generation === viewGeneration && !player) { startPlayer(metadata, client, 0); }
+                            if (generation === viewGeneration && !player) { playlistQueue = nextQueue(next); startPlayer(metadata, client, 0); }
                         }).catch(showPlayerError);
                     }, 10000);
                 }
@@ -5747,6 +6083,7 @@
     // Plex's next-episode lookup is the fallback when no queue was created.
     function queueSuccessor(queue) {
         if (!queue || !queue.items) { return null; }
+        if (queue.playlist) { return window.VemmPlaylists.successor(queue); }
         for (var index = 0; index < queue.items.length - 1; index += 1) {
             if (String(queue.items[index].playQueueItemID) === String(queue.itemId)) {
                 var next = queue.items[index + 1];
@@ -5988,6 +6325,12 @@
             translate("Vemm is a working brand. Trademark clearance and repository migration are not complete.")));
         screen.appendChild(element("p", "help-text",
             translate("Updates keep the existing Samsung application identity, saved settings and signing continuity.")));
+        // Typing the developer code with the remote's number keys while this line is focused unlocks developer mode.
+        var version = "";
+        try { version = window.tizen.application.getCurrentApplication().appInfo.version || ""; } catch (error) { version = ""; }
+        var versionLine = button(screen, version ? translate("Version {version}", { version: version }) : translate("Version"),
+            function () {}, true, "info");
+        versionLine.vemmDevCode = "";
         button(screen, "Back", backView);
         restoreView = openAbout;
         setStatus("");
@@ -6093,6 +6436,27 @@
                 if (isServerOwner()) { libraryRatingSourceEntry(librarySettings, currentClient); }
             } });
         }
+        if (accountClient || (currentClient && currentServerId && window.VemmHomeRows)) {
+            sections.push({ title: "Home", build: function (menu, notes) {
+                var home = group(menu, "", "settings-group");
+                if (accountClient) {
+                    var autoOpen = button(home, translate("Open last profile on launch: {state}", {
+                        state: translate(preferences.autoOpenProfile ? "On" : "Off")
+                    }), function () {
+                        var previous = preferences.autoOpenProfile;
+                        preferences.autoOpenProfile = !previous;
+                        if (!savePreferences()) { preferences.autoOpenProfile = previous; return; }
+                        openSettings(settingsSection);
+                    }, true, "profile");
+                    autoOpen.setAttribute("aria-pressed", String(preferences.autoOpenProfile));
+                    notes.appendChild(element("p", "help-text", translate(
+                        "Skips Who is watching? and opens Home with the profile used last. A profile with a PIN still asks for it.")));
+                }
+                if (currentClient && currentServerId && window.VemmHomeRows) {
+                    button(home, "Home rows", function () { visit(openHomeRows); }, false, "television");
+                }
+            } });
+        }
         sections.push({ title: "Language", build: function (menu) {
             var languages = group(menu, "", "settings-group");
             var names = { en: "English", es: "Español", be: "Беларуская" };
@@ -6161,6 +6525,23 @@
                 "Keeps the pictures shown on Home on this TV, up to the storage limit, so Home appears faster after launch. Off by default. Turning it off deletes them.")));
             if (preferences.saveHomeArtwork) { artworkOptions(performance, notes); }
         } });
+        if (devMode()) {
+            sections.push({ title: "Developer", build: function (menu, notes) {
+                var tools = group(menu, "", "settings-group");
+                button(tools, "Error log", function () { visit(openErrorLog); }, false, "info");
+                button(tools, "Turn off developer mode", function () {
+                    window.VemmDevMode.setEnabled(window.localStorage, false);
+                    openSettings("");
+                }, false, "settings");
+                notes.appendChild(element("p", "help-text", translate("Technical readouts for diagnosing problems. Stats for nerds also shows playback decisions and buffering while this is on.")));
+                var device = element("div", "device-stats");
+                notes.appendChild(device);
+                // One reading per line: joined, they wrapped mid-phrase at 1080p.
+                deviceStatsLines(function (lines) {
+                    lines.forEach(function (line) { device.appendChild(element("p", "help-text", line)); });
+                });
+            } });
+        }
         sections.push({ title: "Privacy and data", build: function (menu, notes) {
             var privacy = group(menu, "", "settings-group");
             var storageWarning = "";
@@ -6230,6 +6611,125 @@
         return sections;
     }
 
+    var homeRowsReorder = null;
+    // Which Plex shelves Home shows and their order for this profile and server. Enter shows or hides a row; with
+    // Reorder on, Up and Down move the focused row.
+    function openHomeRows() {
+        retryView = null;
+        viewGeneration += 1;
+        homeRowsReorder = null;
+        clear(screen);
+        page(translate("Home rows"), "settings");
+        var menu = element("section", "settings-menu");
+        screen.appendChild(menu);
+        var notes = element("div", "settings-notes");
+        screen.appendChild(notes);
+        var api = window.VemmHomeRows;
+        var storeKey = homeRowsKey();
+        var saved = api.load(window.localStorage, storeKey);
+        var rows = [];
+        var reordering = false;
+        var generation = viewGeneration;
+        var controls = group(menu, "", "settings-group");
+        var list = group(menu, "", "settings-group");
+        var reorderToggle = button(controls, translate("Reorder: {state}", { state: translate("Off") }), function () {
+            reordering = !reordering;
+            homeRowsReorder = reordering ? move : null;
+            reorderToggle.setAttribute("aria-pressed", String(reordering));
+            reorderToggle.textContent = translate("Reorder: {state}", { state: translate(reordering ? "On" : "Off") });
+            setStatus(reordering ? "Press Up or Down on a row to move it." : "");
+        }, true, "settings");
+        reorderToggle.setAttribute("aria-pressed", "false");
+        function persist() {
+            saved = api.choose(rows, saved);
+            if (!api.save(window.localStorage, storeKey, saved)) { setStatus("Could not save Home rows. Check app storage permissions.", true); }
+        }
+        function draw(at) {
+            clear(list);
+            rows.forEach(function (row, index) {
+                var node = button(list, row.hub.title || "Plex shelf", function () {
+                    row.shown = !row.shown;
+                    persist();
+                    draw(index);
+                }, true, "none");
+                node.vemmRow = index;
+                node.setAttribute("aria-pressed", String(row.shown));
+                if (!row.shown) { node.className += " home-row-hidden"; }
+            });
+            var nodes = list.querySelectorAll("button");
+            if (at !== undefined && nodes[at]) { nodes[at].focus(); }
+        }
+        function move(index, step) {
+            var target = index + step;
+            if (target < 0 || target >= rows.length) { return false; }
+            var row = rows[index];
+            rows[index] = rows[target];
+            rows[target] = row;
+            persist();
+            draw(target);
+            return true;
+        }
+        button(controls, "Show all rows and reset order", function () {
+            try { window.localStorage.removeItem(storeKey); } catch (error) { /* nothing saved */ }
+            saved = api.load(window.localStorage, storeKey);
+            show(serverHubs);
+        }, false, "refresh");
+        button(menu, "Back", backView);
+        notes.appendChild(element("p", "help-text", translate("Enter shows or hides a row. Turn on Reorder, then press Up or Down on a row to move it.")));
+        var serverHubs = [];
+        function show(hubs) {
+            serverHubs = hubs;
+            rows = api.arrange(hubs.filter(function (hub) { return hub.Metadata && hub.Metadata.length; }), saved);
+            if (!rows.length) { notes.appendChild(element("p", "help-text", translate("No Home shelves were returned."))); }
+            draw();
+        }
+        var cached = homeCache && homeCache.client === currentClient ? homeCache : null;
+        if (cached) { show(cached.hubs); } else {
+            setStatus("Loading...");
+            currentClient.getHomeHubs().then(function (hubs) {
+                if (generation !== viewGeneration) { return; }
+                setStatus("");
+                show(hubs);
+            }).catch(function (error) {
+                if (generation === viewGeneration) { setStatus(errorText(error), true); }
+            });
+        }
+        restoreView = openHomeRows;
+        focusFirst();
+    }
+
+    function logTime(at) {
+        var date = new Date(at);
+        function two(value) { return (value < 10 ? "0" : "") + value; }
+        return date.getFullYear() + "-" + two(date.getMonth() + 1) + "-" + two(date.getDate()) + " " +
+            two(date.getHours()) + ":" + two(date.getMinutes()) + ":" + two(date.getSeconds());
+    }
+
+    // Developer mode: the newest errors the app reported, newest first. Credentials were removed when stored.
+    function openErrorLog() {
+        retryView = null;
+        viewGeneration += 1;
+        clear(screen);
+        page(translate("Error log"), "settings");
+        var menu = element("section", "settings-menu");
+        screen.appendChild(menu);
+        var entries = window.VemmDevMode.list(window.localStorage).reverse();
+        var actions = group(menu, "", "settings-group");
+        button(actions, "Clear log", function () {
+            window.VemmDevMode.clear(window.localStorage);
+            openErrorLog();
+        }, false, "refresh");
+        button(actions, "Back", backView);
+        var list = group(menu, "", "settings-group error-log");
+        entries.forEach(function (entry) {
+            var logged = entry.message;
+            button(list, logTime(entry.at) + "  " + logged, function () {}, true, "none");
+        });
+        restoreView = openErrorLog;
+        setStatus(entries.length ? "" : "No errors recorded.");
+        focusFirst();
+    }
+
     function openSettings(section) {
         retryView = null;
         section = typeof section === "string" ? section : "";
@@ -6255,14 +6755,8 @@
             shown.settingsSection = section;
             restoreView = shown;
         } else {
-            var device = element("div", "device-stats");
-            notes.appendChild(device);
-            // One reading per line: joined, they wrapped mid-phrase at 1080p.
-            deviceStatsLines(function (lines) {
-                lines.forEach(function (line) { device.appendChild(element("p", "help-text", line)); });
-            });
             var sectionIcons = { "Playback": "film", "Audio & subtitles": "audio", "Text overlay appearance": "subtitles",
-                "Libraries": "library", "Profile": "profile", "Language": "language", "Appearance": "palette", "Graphics": "sparkle", "Performance": "gauge", "Privacy and data": "shield" };
+                "Libraries": "library", "Home": "television", "Developer": "settings", "Profile": "profile", "Language": "language", "Appearance": "palette", "Graphics": "sparkle", "Performance": "gauge", "Privacy and data": "shield" };
             sections.forEach(function (candidate) {
                 button(menu, candidate.title, function () {
                     visit(function () { openSettings(candidate.title); });
@@ -6470,6 +6964,20 @@
                 }
             }
         }
+        if (active && active.vemmDevCode !== undefined && window.VemmDevMode) {
+            var entered = window.VemmDevMode.typed(active.vemmDevCode, key);
+            active.vemmDevCode = entered;
+            if (window.VemmDevMode.matches(entered)) {
+                active.vemmDevCode = "";
+                window.VemmDevMode.setEnabled(window.localStorage, true);
+                setStatus("Developer mode is on. Find it in Settings.");
+            }
+        }
+        if (homeRowsReorder && active && active.vemmRow !== undefined && (key === 38 || key === 40) &&
+                homeRowsReorder(active.vemmRow, key === 38 ? -1 : 1)) {
+            event.preventDefault();
+            return;
+        }
         var editing = active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA");
         if (key === 13 && event.repeat) { event.preventDefault(); return; }
         if (player && subtitleTiming && (key === 37 || key === 39)) {
@@ -6638,10 +7146,13 @@
     document.addEventListener("keyup", onKeyUp);
     screen.addEventListener("mousemove", function () { if (player) { showHud(); } });
     screen.addEventListener("click", function () { if (player) { showHud(); } });
+    keepScreenAwake(false);
     document.addEventListener("visibilitychange", function () {
         if (document.hidden) {
             clearGraphics();
             cancelScrub();
+            hidePreview();
+            keepScreenAwake(false);
             cancelHold();
             preload.cancel();
             if (nextTimer !== null) { clearTimeout(nextTimer); nextTimer = null; }
@@ -6674,7 +7185,16 @@
             else { addConnectForm("The app returned to the foreground. Restart pairing if needed."); }
         }
     });
+    window.addEventListener("error", function (event) {
+        var place = event.filename ? " (" + String(event.filename).split("/").pop() + ":" + event.lineno + ")" : "";
+        logError("Uncaught error: " + (event.message || "unknown") + place);
+    });
+    window.addEventListener("unhandledrejection", function (event) {
+        var reason = event.reason;
+        logError("Unhandled promise rejection: " + (reason && reason.message || reason || "unknown"));
+    });
     window.addEventListener("pagehide", function () {
+        keepScreenAwake(false);
         preload.cancel();
         if (graphics) { graphics.dispose(); graphics = null; }
         stopAuthorization();
@@ -6687,7 +7207,7 @@
             ["MediaPlay", "MediaPause", "MediaPlayPause", "MediaStop", "MediaFastForward", "MediaRewind"].forEach(function (name) {
                 window.tizen.tvinputdevice.registerKey(name);
             });
-            ["Tools", "Info"].forEach(function (name) {
+            ["Tools", "Info", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"].forEach(function (name) {
                 try { window.tizen.tvinputdevice.registerKey(name); } catch (ignore) { /* optional card-menu shortcut */ }
             });
         } catch (error) { setStatus("Some media keys could not be registered. Use on-screen playback controls.", true); }
@@ -6700,6 +7220,7 @@
             if (savedAccount) {
                 accountToken = savedAccount;
                 accountClient = window.PlexApi.createAccountClient({ token: accountToken });
+                autoOpenPending = true;
                 openProfiles();
             }
         } catch (error) { setStatus(errorText(error), true); }

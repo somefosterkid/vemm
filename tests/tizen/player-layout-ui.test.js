@@ -13,6 +13,7 @@ var item = {
     title: "A Synthetic Journey",
     grandparentTitle: "Synthetic Show",
     grandparentThumb: "/library/metadata/show/thumb",
+    grandparentRatingKey: "synthetic-show",
     parentTitle: "Season 2",
     parentIndex: 2,
     index: 4,
@@ -30,10 +31,10 @@ var item = {
     Media: [{
         container: "mp4", videoCodec: "h264", audioCodec: "aac", width: 1920, height: 1080,
         Part: [{ id: 1, key: "/library/parts/synthetic/file", Stream: [
-            { id: 11, streamType: 2, language: "English", languageCode: "eng", displayTitle: "English — Stereo", codec: "aac" },
+            { id: 11, streamType: 2, language: "English", languageCode: "eng", displayTitle: "English — Stereo", codec: "aac", selected: true },
             { id: 12, streamType: 2, language: "English", languageCode: "eng", displayTitle: "English — Commentary", codec: "aac" },
             { id: 13, streamType: 2, language: "French", languageCode: "fra", displayTitle: "French", codec: "aac" },
-            { id: 21, streamType: 3, language: "English", languageCode: "eng", displayTitle: "English", codec: "srt" }
+            { id: 21, streamType: 3, language: "English", languageCode: "eng", displayTitle: "English", codec: "srt", selected: true }
         ] }]
     }]
 };
@@ -57,6 +58,12 @@ function playerFixture(trackOptions) {
     var saved = [];
     var timers = [];
     var timersNext = 1;
+    var clock = { now: 0, position: 45000 };
+    var reconnectTimers = [];
+    var sessionOptions = [];
+    if (trackOptions && trackOptions.memory) {
+        window.localStorage.setItem("vemm-tizen-track-memory", JSON.stringify(trackOptions.memory));
+    }
     window.fetch = function () { assert.fail("The player preview must not use the network"); };
     var i18nContext = {};
     vm.runInNewContext(fs.readFileSync(path.join(root, "samsung/Vemm/js/i18n.js"), "utf8"), i18nContext);
@@ -80,15 +87,38 @@ function playerFixture(trackOptions) {
         } };
     }
     window.VemmSkipMarkers = require("../../samsung/Vemm/js/skip-markers.js");
+    window.VemmTrackMemory = require("../../samsung/Vemm/js/track-memory.js");
+    // The reconnect wait on the fixture's own clock: its tries are the entries of reconnectTimers.
+    window.VemmReconnect = { create: function (options) {
+        options.now = function () { return clock.now; };
+        options.setTimeout = function (run, delay) { reconnectTimers.push({ run: run, delay: delay }); return reconnectTimers.length; };
+        options.clearTimeout = function (id) { if (reconnectTimers[id - 1]) { reconnectTimers[id - 1].run = null; } };
+        return require("../../samsung/Vemm/js/reconnect.js").create(options);
+    } };
+    window.eval(fs.readFileSync(path.join(root, "samsung/Vemm/js/ends-at.js"), "utf8"));
+    window.eval(fs.readFileSync(path.join(root, "samsung/Vemm/js/preview-thumbs.js"), "utf8"));
+    var awake = [];
+    window.VemmScreensaver = { keepAwake: function (on) { awake.push(on); } };
+    var blobUrls = [];
+    window.URL.createObjectURL = function () { blobUrls.push("blob:synthetic/" + blobUrls.length); return blobUrls[blobUrls.length - 1]; };
+    window.URL.revokeObjectURL = function () {};
     window.VemmSubtitles = require("../../samsung/Vemm/js/subtitles.js");
+    window.PlexApi = { ratingBadges: function () { return []; } };
     window.VemmAvplay = { create: function (options) { adapters += 1; callbacks.avplay = options; return {}; } };
     window.VemmPlayback = {
         create: function (options) {
             playerSettings.push(options.settings);
+            sessionOptions.push(options);
             var state = "idle";
             return {
                 start: function () {
                     starts += 1;
+                    var scripted = trackOptions && trackOptions.startErrors && trackOptions.startErrors[starts - 1];
+                    if (scripted) {
+                        var failure = new Error(scripted.message || "Synthetic start failure");
+                        Object.keys(scripted).forEach(function (field) { failure[field] = scripted[field]; });
+                        return Promise.reject(failure);
+                    }
                     if (trackOptions && trackOptions.failFirstStart && starts === 1) {
                         return Promise.reject(new Error("Synthetic stream negotiation failure"));
                     }
@@ -99,7 +129,7 @@ function playerFixture(trackOptions) {
                     state = "playing";
                     return Promise.resolve();
                 },
-                snapshot: function () { return { state: state, position: 45000, duration: item.duration }; },
+                snapshot: function () { return { state: state, position: clock.position, duration: item.duration }; },
                 pause: function () { pauses += 1; state = "paused"; return Promise.resolve(); },
                 play: function () { plays += 1; state = "playing"; return Promise.resolve(); },
                 seek: function (position) {
@@ -127,13 +157,19 @@ function playerFixture(trackOptions) {
         }
     };
     var client = {
+        identity: function () { return trackOptions && trackOptions.identity ? trackOptions.identity() : Promise.resolve({}); },
         nextEpisode: function () {
             return Promise.resolve({ ratingKey: "synthetic-next", type: "episode", title: "Next Synthetic Episode",
                 grandparentTitle: "Synthetic Show", parentIndex: 2, index: 5,
                 thumb: "/library/metadata/next/thumb" });
         },
         getMetadata: function () { return Promise.resolve({ ratingKey: "synthetic-next", type: "episode", title: "Next Synthetic Episode" }); },
-        image: function () { return Promise.reject(new Error("No image request is permitted in this fixture")); }
+        image: function () { return Promise.reject(new Error("No image request is permitted in this fixture")); },
+        previewIndex: function (partId) {
+            assert.strictEqual(partId, 1);
+            return Promise.resolve(trackOptions && trackOptions.noPreview ? null :
+                require("./fixtures/bif.js")([[0, 4], [10, 4], [20, 4], [30, 4], [40, 4], [50, 4]], 1000));
+        }
     };
     var source = fs.readFileSync(path.join(root, "samsung/Vemm/main.js"), "utf8");
     var boot = source.lastIndexOf('    addConnectForm("");');
@@ -189,10 +225,21 @@ function playerFixture(trackOptions) {
             callback();
         });
     }
+    // Runs the next pending reconnect try, moving the clock by its pause. Null when none waits.
+    function nextReconnect() {
+        var next = reconnectTimers.filter(function (timer) { return timer.run; })[0];
+        if (!next) { return null; }
+        var run = next.run;
+        next.run = null;
+        clock.now += next.delay;
+        run();
+        return next.delay;
+    }
     return {
+        sessionOptions: sessionOptions, clock: clock, nextReconnect: nextReconnect,
         dom: dom, window: window, document: window.document, callbacks: callbacks, seeks: seeks, heldSeeks: heldSeeks,
         starts: function () { return starts; }, plays: function () { return plays; }, pauses: function () { return pauses; },
-        stops: function () { return stops; },
+        stops: function () { return stops; }, awake: awake, blobUrls: blobUrls,
         finishStart: function () { pending.start(); },
         adapters: function () { return adapters; },
         playerSettings: playerSettings, timers: timers, saved: saved, memory: memory,
@@ -812,6 +859,8 @@ async function deviceReadoutsRefreshOnlyWhileOpen() {
             });
         }
         var before = refreshers().length;
+        app.window.VemmDevMode = require("../../samsung/Vemm/js/dev-mode.js");
+        app.window.localStorage.setItem("vemm-tizen-dev-mode", "1");
         app.click("More");
         app.click("Stats for nerds");
         var stats = app.document.getElementById("playback-stats");
@@ -854,7 +903,342 @@ async function noDeviceApisShowNoReadout() {
     } finally { app.dom.window.close(); }
 }
 
+var DROP = "PLAYER_ERROR_CONNECTION_FAILED";
+function streamLost(app, reason) {
+    app.callbacks.avplay.onEvent({ type: "error", detail: "Samsung playback failed during stream. Stop and retry this title.",
+        reason: reason === undefined ? DROP : reason, position: app.clock.position, duration: item.duration });
+}
+// Playback has started and is moving at the given position.
+async function movingAt(app, position) {
+    await app.settle();
+    app.callbacks.avplay.onEvent({ type: "time", position: position - 500, duration: item.duration });
+    app.clock.position = position;
+    app.callbacks.avplay.onEvent({ type: "time", position: position, duration: item.duration });
+}
+function reconnecting(app) { return app.document.getElementById("reconnecting-note"); }
+function problem(app) { return app.document.querySelector(".playback-error"); }
+
+async function aDroppedConnectionReconnectsAndResumes() {
+    var down = true;
+    var probes = 0;
+    var app = playerFixture({ identity: function () { probes += 1; return down ? Promise.reject(new Error("offline")) : Promise.resolve({}); } });
+    try {
+        await movingAt(app, 50500);
+        streamLost(app);
+        await app.settle();
+        assert(!problem(app), "A dropped connection is not a playback problem");
+        assert(reconnecting(app), "It shows a calm reconnecting state");
+        assert.strictEqual(reconnecting(app).textContent, "Reconnecting...");
+        assert(app.document.querySelector(".buffering-ring"), "with the spinner");
+        assert.strictEqual(app.starts(), 1, "and nothing is restarted while the server is out of reach");
+        assert.strictEqual(probes, 1, "The server is asked at once");
+        assert.strictEqual(app.nextReconnect(), 1000, "then again after 1 s");
+        await app.settle();
+        assert.strictEqual(app.nextReconnect(), 2000, "2 s");
+        await app.settle();
+        assert.strictEqual(probes, 3);
+        assert(reconnecting(app) && !problem(app), "Still reconnecting, still no error");
+        app.click("Pause / Play");
+        await app.settle();
+        assert(!problem(app), "Pause / Play during the wait is not an error");
+        down = false;
+        app.nextReconnect();
+        await app.settle();
+        await app.settle();
+        assert.strictEqual(app.stops(), 1, "The lost stream is closed");
+        assert.strictEqual(app.starts(), 2, "and the title is opened again");
+        assert.strictEqual(app.playerSettings[1].offset, 50500, "where it was");
+        assert(!problem(app) && reconnecting(app), "and keeps saying Reconnecting until the picture moves");
+        await movingAt(app, 50700);
+        assert(!reconnecting(app), "then the note goes");
+    } finally { app.dom.window.close(); }
+}
+
+async function theWaitGivesUpWithARetry() {
+    var app = playerFixture({ identity: function () { return Promise.reject(new Error("offline")); } });
+    try {
+        await movingAt(app, 50500);
+        streamLost(app);
+        await app.settle();
+        for (var tries = 0; tries < 40 && !problem(app); tries += 1) { app.nextReconnect(); await app.settle(); }
+        assert(problem(app), "After the limit the viewer gets a clear message");
+        assert(app.clock.now >= 120000 && app.clock.now < 140000, "after about two minutes, not sooner or later: " + app.clock.now);
+        assert(/could not be reached/.test(problem(app).textContent), "that says the server could not be reached");
+        assert(!reconnecting(app), "The reconnecting note is gone");
+        assert.strictEqual(app.starts(), 1, "Nothing was restarted meanwhile");
+        assert.strictEqual(app.nextReconnect(), null, "and no further tries run");
+        app.click("Retry playback");
+        await app.settle();
+        assert.strictEqual(app.starts(), 2, "Retry opens the title again at the same place");
+        assert.strictEqual(app.playerSettings[1].offset, 50500);
+    } finally { app.dom.window.close(); }
+}
+
+async function aBrokenFileDoesNotLoop() {
+    var app = playerFixture();
+    try {
+        await movingAt(app, 50500);
+        for (var round = 2; round <= 4; round += 1) {
+            streamLost(app);
+            await app.settle();
+            await app.settle();
+            assert.strictEqual(app.starts(), round, "The server answers, so the title is opened again (try " + (round - 1) + ")");
+            assert(!problem(app));
+        }
+        streamLost(app);
+        await app.settle();
+        await app.settle();
+        assert.strictEqual(app.starts(), 4, "After three tries that never played on, it stops reopening");
+        assert(problem(app), "and shows the problem with its buttons");
+        assert(app.findButton("Retry playback") && app.findButton("Restart"));
+        assert(!reconnecting(app));
+    } finally { app.dom.window.close(); }
+}
+
+async function playingOnAfterAReopenStartsTheCountAgain() {
+    var app = playerFixture();
+    try {
+        await movingAt(app, 50500);
+        for (var round = 2; round <= 6; round += 1) {
+            streamLost(app);
+            await app.settle();
+            await app.settle();
+            assert.strictEqual(app.starts(), round, "Drop " + (round - 1) + " is recovered");
+            await movingAt(app, 50500 + (round - 1) * 20000);
+        }
+        assert(!problem(app), "Drops that each play on never become a problem");
+    } finally { app.dom.window.close(); }
+}
+
+async function aReopenThatFailsOutrightWaitsAndTriesAgain() {
+    // Starts 2 to 5 fail with no word from Plex (the connection again); the sixth plays.
+    var failing = { message: "The request timed out. Check the network and retry." };
+    var app = playerFixture({ startErrors: [null, failing, failing, failing, failing] });
+    try {
+        await movingAt(app, 50500);
+        streamLost(app);
+        for (var round = 2; round <= 5; round += 1) {
+            await app.settle();
+            await app.settle();
+            assert.strictEqual(app.starts(), round, "Reopen " + (round - 1));
+            await app.settle();
+            assert(!problem(app) && reconnecting(app), "A reopen that fails outright is more waiting, not a problem");
+            assert.strictEqual(app.nextReconnect(), 3000, "after a pause of 3 s");
+        }
+        await app.settle();
+        await app.settle();
+        assert.strictEqual(app.starts(), 6, "The next reopen opens");
+        assert(!problem(app));
+    } finally { app.dom.window.close(); }
+
+    var unsupported = playerFixture({ startErrors: [null, { message: "Samsung playback failed during prepare. Stop and retry this title.",
+        code: "avplay-prepare", reason: "PLAYER_ERROR_NOT_SUPPORTED_FILE" }] });
+    try {
+        await movingAt(unsupported, 50500);
+        streamLost(unsupported);
+        await unsupported.settle();
+        await unsupported.settle();
+        await unsupported.settle();
+        assert(problem(unsupported), "A reopen AVPlay refuses as unsupported is the file's problem");
+        assert(!reconnecting(unsupported));
+    } finally { unsupported.dom.window.close(); }
+
+    var refused = playerFixture({ startErrors: [null, { message: "Plex refused this session.", status: 401 }] });
+    try {
+        await movingAt(refused, 50500);
+        streamLost(refused);
+        await refused.settle();
+        await refused.settle();
+        await refused.settle();
+        assert(problem(refused), "An answer from Plex that says no is shown as the problem");
+    } finally { refused.dom.window.close(); }
+}
+
+async function otherStreamErrorsStayProblems() {
+    var app = playerFixture();
+    try {
+        await movingAt(app, 50500);
+        streamLost(app, "PLAYER_ERROR_NOT_SUPPORTED_FILE");
+        await app.settle();
+        assert(problem(app), "An error that is not a lost connection shows the problem at once");
+        assert(!reconnecting(app));
+        assert.strictEqual(app.starts(), 1);
+    } finally { app.dom.window.close(); }
+}
+
+async function stoppingEndsTheWait() {
+    var app = playerFixture({ identity: function () { return Promise.reject(new Error("offline")); } });
+    try {
+        await movingAt(app, 50500);
+        streamLost(app);
+        await app.settle();
+        assert(reconnecting(app));
+        app.key(413);
+        await app.settle();
+        assert.strictEqual(app.stops(), 1, "Stop closes the player");
+        assert(!reconnecting(app));
+        assert.strictEqual(app.nextReconnect(), null, "and ends the retries");
+        assert.strictEqual(app.starts(), 1);
+    } finally { app.dom.window.close(); }
+}
+
+async function aLongStallShowsReconnectingOnlyWhenTheServerIsGone() {
+    var down = true;
+    var app = playerFixture({ identity: function () { return down ? Promise.reject(new Error("offline")) : Promise.resolve({}); } });
+    try {
+        await movingAt(app, 50500);
+        var send = function (type, detail) {
+            app.callbacks.avplay.onEvent({ type: type, detail: detail, position: 50500, duration: item.duration });
+        };
+        send("buffering", true);
+        await app.settle();
+        assert(!reconnecting(app), "A short stall is only the buffering ring");
+        app.runTimers(6000);
+        await app.settle();
+        assert(reconnecting(app), "A stall of 6 s with the server out of reach says Reconnecting");
+        assert(!problem(app) && app.starts() === 1, "without an error or a restart");
+        send("buffering", false);
+        assert(!reconnecting(app), "and stops saying it once playback buffers again");
+        assert.strictEqual(app.nextReconnect(), null, "with the checks ended");
+        down = false;
+        send("buffering", true);
+        app.runTimers(6000);
+        await app.settle();
+        assert(!reconnecting(app), "A slow buffer with the server reachable stays the ordinary ring");
+        send("buffering", false);
+    } finally { app.dom.window.close(); }
+}
+
+async function progressNoticesAreQuietDuringAnOutage() {
+    var app = playerFixture({ identity: function () { return Promise.reject(new Error("offline")); } });
+    try {
+        await movingAt(app, 50500);
+        var status = app.document.getElementById("status");
+        app.sessionOptions[0].onEvent({ type: "progress-error", message: "Plex progress could not be saved. Check the server and retry." });
+        assert(/progress could not be saved/.test(status.textContent), "A failed report is still told when playing normally");
+        app.sessionOptions[0].onEvent({ type: "progress-restored" });
+        assert.strictEqual(status.textContent, "", "and cleared once reports get through");
+        streamLost(app);
+        await app.settle();
+        app.sessionOptions[0].onEvent({ type: "progress-error", message: "Plex progress could not be saved. Check the server and retry." });
+        assert.strictEqual(status.textContent, "", "While reconnecting, reports failing is no news");
+    } finally { app.dom.window.close(); }
+}
+
+function savedMemory(app) {
+    return JSON.parse(app.window.localStorage.getItem("vemm-tizen-track-memory") || "[]");
+}
+
+async function aTrackPickIsRememberedForTheShow() {
+    var app = playerFixture();
+    try {
+        await app.settle();
+        assert.strictEqual(app.playerSettings[0].audioId, undefined, "Without a memory the server's defaults are used");
+        app.click("Audio");
+        app.click("Other languages");
+        app.click("French");
+        app.click("French");
+        await app.settle();
+        assert.deepStrictEqual(savedMemory(app), [{ show: "synthetic-show", audio: "fra" }],
+            "An audio pick is kept for the show by language, with no subtitle choice");
+        app.click("Subtitles");
+        app.click("Subtitles off");
+        await app.settle();
+        assert.strictEqual(savedMemory(app)[0].subtitle, "off", "so is turning subtitles off");
+        assert.strictEqual(savedMemory(app)[0].audio, "fra");
+    } finally { app.dom.window.close(); }
+}
+
+async function anotherEpisodeFollowsTheShowsTracks() {
+    var app = playerFixture({ memory: [{ show: "synthetic-show", audio: "fra" }] });
+    try {
+        await app.settle();
+        assert.strictEqual(app.playerSettings[0].audioId, 13, "The remembered language's track is chosen");
+        assert.strictEqual(app.playerSettings[0].subtitleId, 21, "and the server's subtitle pick is kept");
+    } finally { app.dom.window.close(); }
+    var other = playerFixture({ memory: [{ show: "another-show", audio: "fra" }] });
+    try {
+        await other.settle();
+        assert.strictEqual(other.playerSettings[0].audioId, undefined, "Another show's memory does not apply");
+    } finally { other.dom.window.close(); }
+    var missing = playerFixture({ memory: [{ show: "synthetic-show", audio: "jpn", subtitle: "deu" }] });
+    try {
+        await missing.settle();
+        assert.strictEqual(missing.playerSettings[0].audioId, undefined, "A language this episode lacks falls back to the defaults");
+    } finally { missing.dom.window.close(); }
+    var explicit = playerFixture({ memory: [{ show: "synthetic-show", audio: "fra" }], audioId: 12, subtitleId: 21 });
+    try {
+        await explicit.settle();
+        assert.strictEqual(explicit.playerSettings[0].audioId, 12, "A pick made in this playback is not overridden");
+    } finally { explicit.dom.window.close(); }
+}
+
+async function theShowsTrackChoicesCanBeReset() {
+    var app = playerFixture();
+    try {
+        await app.settle();
+        app.click("Audio");
+        assert(!app.findButton("Reset to default tracks"), "There is nothing to reset before a pick");
+        app.key(27);
+    } finally { app.dom.window.close(); }
+    var set = playerFixture({ memory: [{ show: "synthetic-show", audio: "fra" }, { show: "another-show", audio: "jpn" }] });
+    try {
+        await set.settle();
+        set.click("Audio");
+        set.click("Reset to default tracks");
+        assert.deepStrictEqual(savedMemory(set), [{ show: "another-show", audio: "jpn" }], "Reset forgets only this show");
+        set.click("Audio");
+        assert(!set.findButton("Reset to default tracks"), "and the button goes");
+    } finally { set.dom.window.close(); }
+}
+
+// Scrubbing shows the frame at the target above the timeline until the seek lands; the HUD says when the
+// content ends; the TV's screensaver is off only while the picture plays.
+async function previewEndsAtAndScreensaver() {
+    var app = playerFixture({ holdSeeks: true });
+    try {
+        await app.settle();
+        var ends = app.document.querySelector(".playback-ends");
+        assert(ends && /^Ends at [0-9]{1,2}:[0-9]{2} (AM|PM)$/.test(ends.textContent), "The HUD says when it ends: " + (ends && ends.textContent));
+        assert.deepStrictEqual(app.awake, [false], "The TV default is set at start-up, not left off");
+        app.callbacks.avplay.onEvent({ type: "state", state: "playing" });
+        assert.deepStrictEqual(app.awake, [false, true]);
+        app.callbacks.avplay.onEvent({ type: "time", position: 45000, duration: item.duration });
+        await app.settle();
+        assert(!app.document.querySelector(".preview-thumb"), "No preview while nothing is scrubbed");
+        app.click("Back 10 seconds");
+        await app.settle();
+        var thumb = app.document.querySelector("#playback-progress .preview-thumb");
+        assert(thumb && !thumb.hidden, "Scrubbing shows a preview frame on the timeline");
+        assert.strictEqual(thumb.querySelector("img").src, "blob:synthetic/0");
+        assert.strictEqual(app.blobUrls.length, 1, "of the frame at 35 s");
+        app.click("Back 10 seconds");
+        assert.strictEqual(app.blobUrls.length, 2, "A further press shows the next frame");
+        app.runTimers(400);
+        assert(!thumb.hidden, "The frame stays while the seek lands");
+        app.heldSeeks[0].resolve(25000);
+        await app.settle();
+        assert(thumb.hidden, "and goes once it has landed");
+        app.callbacks.avplay.onEvent({ type: "state", state: "paused" });
+        assert.deepStrictEqual(app.awake, [false, true, false], "Paused lets the screensaver return");
+        app.window.dispatchEvent(new app.window.Event("pagehide"));
+        await app.settle();
+        assert.strictEqual(app.awake[app.awake.length - 1], false, "Stopping restores the TV's default");
+        assert(!app.document.querySelector(".preview-thumb"), "and releases the preview");
+    } finally { app.dom.window.close(); }
+
+    app = playerFixture({ noPreview: true });
+    try {
+        await app.settle();
+        app.click("Back 10 seconds");
+        await app.settle();
+        assert(!app.document.querySelector(".preview-thumb"), "A title without an index shows no preview and no problem");
+        assert(!app.document.getElementById("playback-error"));
+    } finally { app.dom.window.close(); }
+}
+
 async function run() {
+    await previewEndsAtAndScreensaver();
     await bufferingShowsPercent();
     await bufferSizeIsChosenFromMoreAndRestartsTheStream();
     await moreMenuOrder();
@@ -878,6 +1262,18 @@ async function run() {
     await failedPlayerRecoveryRestartsThePipeline();
     await deviceReadoutsRefreshOnlyWhileOpen();
     await noDeviceApisShowNoReadout();
+    await aDroppedConnectionReconnectsAndResumes();
+    await theWaitGivesUpWithARetry();
+    await aBrokenFileDoesNotLoop();
+    await playingOnAfterAReopenStartsTheCountAgain();
+    await aReopenThatFailsOutrightWaitsAndTriesAgain();
+    await otherStreamErrorsStayProblems();
+    await stoppingEndsTheWait();
+    await aLongStallShowsReconnectingOnlyWhenTheServerIsGone();
+    await progressNoticesAreQuietDuringAnOutage();
+    await aTrackPickIsRememberedForTheShow();
+    await anotherEpisodeFollowsTheShowsTracks();
+    await theShowsTrackChoicesCanBeReset();
     console.log("Tizen LG-style player HUD, panels, Up Next, tracks, timing, stats and recovery: passed (synthetic player)");
 }
 run().catch(function (error) { console.error(error.stack || error); process.exitCode = 1; });

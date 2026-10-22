@@ -19,7 +19,7 @@
         var listener = null;
         var clock = null;
 
-        function notify(type, detail) { emit({ type: type, state: state, position: position, duration: duration, detail: detail }); }
+        function notify(type, detail, reason) { emit({ type: type, state: state, position: position, duration: duration, detail: detail, reason: reason }); }
         function transition(next) { state = next; notify("state"); }
         function error(operation) {
             var failure = new Error("Samsung playback failed during " + operation + ". Stop and retry this title.");
@@ -116,14 +116,16 @@
             return new Promise(function (resolve, reject) {
                 pending = reject;
                 var moved = null;
-                function failed(operation) {
+                function failed(operation, reason) {
                     if (ownGeneration !== generation || !pending) { return; }
                     clearTimeout(timer);
                     timer = null;
                     pending = null;
                     generation += 1;
                     transition("error");
-                    reject(error(operation));
+                    var failure = error(operation);
+                    if (reason) { failure.reason = String(reason); }
+                    reject(failure);
                 }
                 try {
                     avplay.open(url);
@@ -169,13 +171,13 @@
                                 notify("ended");
                             }
                         },
-                        onerror: function () {
+                        onerror: function (type) {
                             if (ownGeneration !== generation) { return; }
-                            if (pending) { failed("prepare"); }
+                            if (pending) { failed("prepare", type); }
                             else {
                                 generation += 1;
                                 if (pendingSeek) { pendingSeek(new Error("Seek cancelled.")); }
-                                transition("error"); notify("error", error("stream").message);
+                                transition("error"); notify("error", error("stream").message, String(type || ""));
                             }
                         }
                     };
@@ -253,7 +255,7 @@
                                 if (!readySettled) { readyGuard = setTimeout(function () { settleReady(false); }, resumeWait); }
                             } else { play(true); }
                         } catch (failure) { failed("prepare"); }
-                    }, function () { failed("prepare"); });
+                    }, function (cause) { failed("prepare", cause && cause.name || cause); });
                 } catch (failure) { failed("open"); }
             });
         }

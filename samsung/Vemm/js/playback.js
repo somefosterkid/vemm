@@ -270,6 +270,7 @@
         var reportChain = Promise.resolve();
         var reporting = false;
         var pendingReport = null;
+        var reportsFailing = false;
         var lastPosition = Math.max(0, Number(settings.offset) || 0);
         var buffer = null;
         var prebuffer = true;
@@ -290,7 +291,13 @@
                 return Promise.resolve().then(function () {
                     return client.timeline(item, next.position, next.state, selection.session,
                         settings.playQueue || null, selection.tracks);
-                }).catch(function () {
+                }).then(function () {
+                    // The report got through: say so if the viewer was told it was failing.
+                    if (reportsFailing) { reportsFailing = false; emit({ type: "progress-restored" }); }
+                }, function () {
+                    // Every 10 s report fails while the server is out of reach: one notice per outage.
+                    if (reportsFailing) { return; }
+                    reportsFailing = true;
                     emit({ type: "progress-error", message: "Plex progress could not be saved. Check the server and retry." });
                 }).then(function () {
                     if (pendingReport) { return drain(); }

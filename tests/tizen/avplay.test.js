@@ -295,6 +295,31 @@ async function run() {
     await adapter.open("https://synthetic.invalid/stream", 45000, true, null, { prebuffer: true });
     assert.strictEqual(adapter.snapshot().state, "playing", "A pause the TV still refuses leaves the stream playing, not failed");
     adapter.close();
+    // A stream error after the start tells why (the native error name) and keeps the last position for a reopen.
+    native = fake();
+    events = [];
+    adapter = av.create({ avplay: native, onEvent: function (event) { events.push(event); } });
+    await adapter.open("https://synthetic.invalid/stream", 0);
+    native.send("oncurrentplaytime", 61000);
+    native.send("onerror", "PLAYER_ERROR_CONNECTION_FAILED");
+    var failure = events.filter(function (event) { return event.type === "error"; })[0];
+    assert(failure, "A stream error is reported");
+    assert.strictEqual(failure.reason, "PLAYER_ERROR_CONNECTION_FAILED", "with the native error name");
+    assert.strictEqual(failure.position, 61000, "and the position it had reached");
+    assert.strictEqual(adapter.snapshot().state, "error");
+    adapter.close();
+
+    // A failed open says why when AVPlay does: a lost connection can be waited out, an unsupported file cannot.
+    native = fake();
+    native.prepareAsync = function (success, failure) { failure({ name: "PLAYER_ERROR_CONNECTION_FAILED" }); };
+    adapter = av.create({ avplay: native });
+    await assert.rejects(adapter.open("https://synthetic.invalid/stream", 0),
+        function (failure) { return failure.code === "avplay-prepare" && failure.reason === "PLAYER_ERROR_CONNECTION_FAILED"; });
+    native = fake();
+    native.prepareAsync = function () { setTimeout(function () { native.send("onerror", "PLAYER_ERROR_NOT_SUPPORTED_FILE"); }, 0); };
+    adapter = av.create({ avplay: native });
+    await assert.rejects(adapter.open("https://synthetic.invalid/stream", 0),
+        function (failure) { return failure.code === "avplay-prepare" && failure.reason === "PLAYER_ERROR_NOT_SUPPORTED_FILE"; });
     console.log("Tizen AVPlay state/cancellation/seek tests: passed");
 }
 run().catch(function (error) { console.error(error); process.exitCode = 1; });

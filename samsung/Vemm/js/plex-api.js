@@ -88,7 +88,7 @@
         };
     }
 
-    function timedFetch(fetchRequest, url, options, scope) {
+    function timedFetch(fetchRequest, url, options, scope, maxBytes) {
         var revision = scope ? scope.revision : 0;
         function cancelled() { return requestCancelled(); }
         function register(cancel) { if (scope) { scope.pending.push(cancel); } }
@@ -148,7 +148,7 @@
                             unregister(cancelBody);
                             resolveBody(value);
                         }
-                        var limit = 4 * 1024 * 1024;
+                        var limit = maxBytes || 4 * 1024 * 1024;
                         function cancelBody() { fail(cancelled()); }
                         register(cancelBody);
                         try {
@@ -825,10 +825,10 @@
                     });
                 });
             },
-            getTracks: function (id) {
+            getTracks: function (id, playlist) {
                 var tracks = [];
                 function page(start) {
-                    return get("/library/metadata/" + key(id) + "/children", "GET", {
+                    return get(playlist ? "/playlists/" + key(id) + "/items" : "/library/metadata/" + key(id) + "/children", "GET", {
                         "X-Plex-Container-Start": start, "X-Plex-Container-Size": 50
                     }).then(function (container) {
                         var items = listFrom(container, "Metadata");
@@ -848,6 +848,41 @@
                     });
                 }
                 return page(0);
+            },
+            getPlaylists: function (start) {
+                return get("/playlists", "GET", { "X-Plex-Container-Start": start || 0, "X-Plex-Container-Size": 50 });
+            },
+            getPlaylist: function (id) {
+                return get("/playlists/" + key(id)).then(function (container) {
+                    var playlists = listFrom(container, "Metadata");
+                    if (!playlists.length) { throw new Error("This playlist is no longer available."); }
+                    return playlists[0];
+                });
+            },
+            getPlaylistItems: function (id, start) {
+                return get("/playlists/" + key(id) + "/items", "GET", { "X-Plex-Container-Start": start || 0, "X-Plex-Container-Size": 50 });
+            },
+            // A server-side video queue over the playlist (shuffled by the server when asked), starting at one item.
+            createPlaylistPlayQueue: function (machineId, playlistId, shuffle, firstRatingKey) {
+                if (!/^[0-9A-Za-z_-]{1,80}$/.test(String(machineId || ""))) {
+                    return Promise.reject(new Error("The server identity is invalid."));
+                }
+                var query = { type: "video", playlistID: key(playlistId), shuffle: shuffle ? 1 : 0, repeat: 0, continuous: 0 };
+                if (firstRatingKey) { query.key = "/library/metadata/" + key(firstRatingKey); }
+                return get("/playQueues", "POST", query).then(function (container) {
+                    var id = String(container.playQueueID || "");
+                    var selected = String(container.playQueueSelectedItemID || "");
+                    if (!/^[1-9][0-9]*$/.test(id) || !/^[1-9][0-9]*$/.test(selected)) {
+                        throw new Error("Plex returned an invalid play queue.");
+                    }
+                    return { id: id, itemId: selected, items: listFrom(container, "Metadata"), total: Number(container.playQueueTotalCount) || 0 };
+                });
+            },
+            // The items of a play queue around one of its items (20 on each side).
+            getPlayQueueItems: function (queueId, center) {
+                return get("/playQueues/" + key(queueId), "GET", { center: key(center), window: 20 }).then(function (container) {
+                    return listFrom(container, "Metadata");
+                });
             },
             getCollectionItems: function (id, start) {
                 return get("/library/collections/" + key(id) + "/children", "GET", {
@@ -974,6 +1009,24 @@
                 return baseUrl + path + "?" + Object.keys(params).map(function (name) {
                     return encodeURIComponent(name) + "=" + encodeURIComponent(params[name]);
                 }).concat(token ? ["X-Plex-Token=" + encodeURIComponent(token)] : []).join("&");
+            },
+            // The preview-thumbnail index (BIF) of a part: its bytes, or null when the server has none.
+            previewIndex: function (partId) {
+                return timedFetch(fetchRequest, baseUrl + "/library/parts/" + key(partId) + "/indexes/sd", {
+                    credentials: "omit", redirect: "error", headers: { "X-Plex-Token": token }
+                }, scope, 32 * 1024 * 1024).then(function (response) {
+                    if (response.status === 404) { return null; }
+                    if (!response.ok) { throw new Error("Plex refused the preview index (HTTP " + response.status + ")."); }
+                    return response.blob();
+                }).then(function (blob) {
+                    if (!blob) { return null; }
+                    return new Promise(function (resolve, reject) {
+                        var reader = new FileReader();
+                        reader.onload = function () { resolve(reader.result); };
+                        reader.onerror = function () { reject(new Error("The preview index could not be read.")); };
+                        reader.readAsArrayBuffer(blob);
+                    });
+                });
             },
             subtitleText: function (id, codec) {
                 if (["srt", "subrip", "webvtt"].indexOf(codec) === -1) {
