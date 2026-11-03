@@ -245,7 +245,8 @@ async function settings() {
         var text = applied.textContent;
         click(/^Accent: Teal$/); click(/^Teal$/);
         assert.strictEqual(applied.textContent, text, "Choosing the applied theme again rewrites nothing");
-        click(/^Back$/); click(/^Privacy and data$/); click(/^Reset preferences$/);
+        window.document.dispatchEvent(new window.KeyboardEvent("keydown", { keyCode: 10009, bubbles: true }));
+        click(/^Privacy and data$/); click(/^Reset preferences$/);
         assert.strictEqual(applied.getAttribute("data-theme"), "blue blue", "Reset preferences returns to Blue");
     } finally { window.close(); }
 }

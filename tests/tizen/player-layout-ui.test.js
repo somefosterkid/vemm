@@ -88,6 +88,8 @@ function playerFixture(trackOptions) {
     }
     window.VemmSkipMarkers = require("../../samsung/Vemm/js/skip-markers.js");
     window.VemmTrackMemory = require("../../samsung/Vemm/js/track-memory.js");
+    window.VemmTrackMenu = require("../../samsung/Vemm/js/track-menu.js");
+    window.VemmSubtitleSearch = window.VemmSubtitleSearch || require("../../samsung/Vemm/js/subtitle-search.js");
     // The reconnect wait on the fixture's own clock: its tries are the entries of reconnectTimers.
     window.VemmReconnect = { create: function (options) {
         options.now = function () { return clock.now; };
@@ -106,6 +108,8 @@ function playerFixture(trackOptions) {
     window.PlexApi = { ratingBadges: function () { return []; } };
     window.VemmAvplay = { create: function (options) { adapters += 1; callbacks.avplay = options; return {}; } };
     window.VemmPlayback = {
+        plan: function () { return { direct: false }; },
+        ceiling: function () { return 8000; },
         create: function (options) {
             playerSettings.push(options.settings);
             sessionOptions.push(options);
@@ -127,7 +131,7 @@ function playerFixture(trackOptions) {
                         return new Promise(function (resolve) { pending.start = function () { state = "playing"; resolve(); }; });
                     }
                     state = "playing";
-                    return Promise.resolve();
+                    return Promise.resolve(trackOptions && trackOptions.startResult);
                 },
                 snapshot: function () { return { state: state, position: clock.position, duration: item.duration }; },
                 pause: function () { pauses += 1; state = "paused"; return Promise.resolve(); },
@@ -148,8 +152,15 @@ function playerFixture(trackOptions) {
                 },
                 stop: function () { stops += 1; state = "idle"; return Promise.resolve(item); },
                 buffer: function () { return trackOptions && trackOptions.buffer || null; },
-                selection: function () { return { audioId: 11, subtitleId: 21 }; },
-                part: function () { return item.Media[0].Part[0]; },
+                selection: function () {
+                    if (!(trackOptions && trackOptions.liveSelection)) { return { audioId: 11, subtitleId: 21 }; }
+                    function live(type, wanted) {
+                        var plexChoice = trackOptions.streams.filter(function (stream) { return stream.streamType === type && stream.selected; })[0];
+                        return wanted !== undefined ? wanted : plexChoice ? plexChoice.id : 0;
+                    }
+                    return { audioId: live(2, options.settings.audioId), subtitleId: live(3, options.settings.subtitleId) };
+                },
+                part: function () { return trackOptions && trackOptions.streams ? { id: 1, Stream: trackOptions.streams } : item.Media[0].Part[0]; },
                 quality: function () { return { source: item.Media[0], stream: item.Media[0], mode: "direct", limit: "original" }; },
                 tracks: function () { return trackOptions && trackOptions.nativeTracks ? [{ type: "AUDIO", index: 0 }] : []; },
                 setSubtitleOffset: function (offset) { callbacks.subtitleOffset = offset; }
@@ -157,6 +168,7 @@ function playerFixture(trackOptions) {
         }
     };
     var client = {
+        searchSubtitles: function () { return Promise.resolve({}); },
         identity: function () { return trackOptions && trackOptions.identity ? trackOptions.identity() : Promise.resolve({}); },
         nextEpisode: function () {
             return Promise.resolve({ ratingKey: "synthetic-next", type: "episode", title: "Next Synthetic Episode",
@@ -164,7 +176,9 @@ function playerFixture(trackOptions) {
                 thumb: "/library/metadata/next/thumb" });
         },
         getMetadata: function () { return Promise.resolve({ ratingKey: "synthetic-next", type: "episode", title: "Next Synthetic Episode" }); },
+        getChildren: function () { return Promise.resolve({ totalSize: 0, Metadata: [] }); },
         image: function () { return Promise.reject(new Error("No image request is permitted in this fixture")); },
+        subtitleText: function () { return trackOptions && trackOptions.subtitleError ? Promise.reject(new Error(trackOptions.subtitleError)) : Promise.resolve(trackOptions.subtitleFile); },
         previewIndex: function (partId) {
             assert.strictEqual(partId, 1);
             return Promise.resolve(trackOptions && trackOptions.noPreview ? null :
@@ -175,6 +189,8 @@ function playerFixture(trackOptions) {
     var boot = source.lastIndexOf('    addConnectForm("");');
     assert(boot !== -1, "The app boot boundary remains available to isolated UI tests");
     var playing = trackOptions && trackOptions.markers ? Object.assign({}, item, { Marker: trackOptions.markers }) : item;
+    if (trackOptions && trackOptions.streams) { playing = JSON.parse(JSON.stringify(item)); playing.Media[0].Part[0].Stream = trackOptions.streams; }
+    if (trackOptions && trackOptions.movie) { playing.type = "movie"; playing.ratingKey = "synthetic-movie"; delete playing.grandparentRatingKey; }
     source = source.slice(0, boot) +
         '    startPlayer(' + JSON.stringify(playing) + ', window.__syntheticClient, 45000, 0, ' +
         JSON.stringify(trackOptions || null) + '); }());';
@@ -322,7 +338,7 @@ async function playerControlsShareOneRow() {
         app.key(38);
         assert.strictEqual(doc.activeElement.id, "playback-progress", "Up from the row focuses the timeline");
         app.key(40);
-        assert.strictEqual(doc.activeElement, more, "Down from the timeline returns to the row");
+        assert.strictEqual(doc.activeElement, app.findButton("Pause / Play"), "Down from the timeline lands on Pause");
     } finally { app.dom.window.close(); }
 }
 
@@ -348,7 +364,71 @@ async function downClosesTheChapterStrip() {
         assert(doc.getElementById("chapter-strip").contains(doc.activeElement), "Focus enters the strip");
         app.key(40);
         assert(!doc.getElementById("chapter-strip"), "Down closes the strip");
-        assert.strictEqual(doc.activeElement, app.findButton("Chapters"), "Focus returns to the Chapters button");
+        assert.strictEqual(doc.activeElement, app.findButton("Pause / Play"), "Focus lands on Pause");
+        app.click("Chapters");
+        app.key(38);
+        assert.strictEqual(doc.activeElement, app.findButton("Pause / Play"), "Up from the strip lands on Pause too");
+    } finally { app.dom.window.close(); }
+}
+
+async function theControlsRowIsEnteredAtPause() {
+    var app = playerFixture();
+    try {
+        var doc = app.document;
+        var pause = app.findButton("Pause / Play");
+        ["More", "Subtitles", "Chapters"].forEach(function (name) {
+            app.findButton(name).focus();
+            app.key(38);
+            assert.strictEqual(doc.activeElement.id, "playback-progress");
+            app.key(40);
+            assert.strictEqual(doc.activeElement, pause, "Down from the timeline lands on Pause, not " + name);
+        });
+        app.key(39);
+        assert.strictEqual(doc.activeElement, app.findButton("Forward 10 seconds"), "Right then moves along the row");
+        app.key(38);
+        app.key(27);
+        assert.strictEqual(doc.activeElement, pause, "Back from the timeline lands on Pause");
+    } finally { app.dom.window.close(); }
+}
+
+async function okOnTheTimelinePauses() {
+    var app = playerFixture();
+    try {
+        await app.settle();
+        app.callbacks.avplay.onEvent({ type: "time", position: 45500, duration: item.duration });
+        await app.settle();
+        var doc = app.document;
+        var progress = doc.getElementById("playback-progress");
+        var icon = app.findButton("Pause / Play");
+        progress.focus();
+        app.key(13);
+        await app.settle();
+        assert.strictEqual(app.pauses(), 1, "OK on the timeline pauses");
+        assert.strictEqual(doc.activeElement, progress, "Focus stays on the timeline");
+        app.callbacks.avplay.onEvent({ type: "state", state: "paused" });
+        assert(/menu-icon-play/.test(icon.className), "The icon shows Play");
+        app.key(13);
+        await app.settle();
+        assert.strictEqual(app.plays(), 1, "A second OK resumes");
+        app.callbacks.avplay.onEvent({ type: "state", state: "playing" });
+        assert(/menu-icon-pause/.test(icon.className));
+        // A pending scrub is committed by OK, not paused.
+        app.key(39);
+        app.key(13);
+        await app.settle();
+        assert.strictEqual(app.seeks.length, 1, "OK commits a pending scrub at once");
+        assert.strictEqual(app.pauses(), 1, "and does not pause");
+    } finally { app.dom.window.close(); }
+}
+
+async function okOnTheTimelineDuringAStartWaits() {
+    var app = playerFixture({ pendingStart: true });
+    try {
+        app.document.getElementById("playback-progress").focus();
+        app.key(13);
+        await app.settle();
+        assert.strictEqual(app.pauses(), 0, "Nothing is paused before the picture moves");
+        assert(/menu-icon-play/.test(app.findButton("Pause / Play").className), "The pause is asked for");
     } finally { app.dom.window.close(); }
 }
 
@@ -377,24 +457,60 @@ async function trackMenusAreIndependentAndOnTheLeft() {
     } finally { app.dom.window.close(); }
 }
 
-async function subItemsAreMarked() {
+async function trackMenusAreOneFlatList() {
     var app = playerFixture();
     try {
         app.click("Audio");
-        var english = app.findButton("English");
-        var other = app.findButton("Other languages");
-        assert(/menu-has-sub/.test(english.className), "A language that expands has the indicator class");
-        assert(/menu-has-sub/.test(other.className), "Other languages has the indicator class");
-        assert(!/menu-sub-item/.test(english.className), "A top-level language is a primary row");
-        english.click();
-        var track = app.findButton("English — Stereo");
-        assert(/menu-sub-item/.test(track.className), "Tracks inside a language are indented sub-items");
+        var menu = app.document.getElementById("player-menu");
+        assert.deepStrictEqual(rowLabels(menu), ["English — Stereo", "English — Commentary", "French · AAC"],
+            "Every track is one press away; two tracks read differently under one language");
+        assert.strictEqual(app.document.activeElement, app.findButton("English — Stereo"), "Focus starts on the current track, first");
+        assert.strictEqual(app.document.activeElement.getAttribute("aria-pressed"), "true");
+        assert.deepStrictEqual(Array.from(menu.querySelectorAll(".group-title")).map(function (node) { return node.textContent; }),
+            ["Other languages"], "Other languages is a heading, not a level");
+        assert(!menu.querySelector(".menu-has-sub"), "No track opens another list");
         app.key(10009);
-        assert(app.findButton("English"), "Back from a language's tracks returns to the languages");
-        app.click("Other languages");
-        var french = app.findButton("French");
-        assert(/menu-sub-item/.test(french.className) && /menu-has-sub/.test(french.className),
-            "Languages under Other languages are sub-items that also expand");
+        assert(!app.document.getElementById("player-menu"), "Back closes it at once");
+
+        app.click("Subtitles");
+        menu = app.document.getElementById("player-menu");
+        assert.deepStrictEqual(rowLabels(menu), ["English", "Subtitles off", "Search for subtitles", "Appearance"],
+            "The current track, Off, then what is not a track");
+        var rows = menu.querySelectorAll("button");
+        assert.strictEqual(app.document.activeElement, rows[0], "Focus starts on the current track");
+        app.key(38);
+        assert.strictEqual(app.document.activeElement, app.findButton("Appearance"), "Appearance is one press Up from the first row");
+        assert(app.findButton("Appearance").parentNode.classList.contains("menu-footer"), "It stays in view below the list");
+        assert(/menu-has-sub/.test(app.findButton("Search for subtitles").className), "Rows that open another list say so");
+        app.click("Search for subtitles");
+        assert.strictEqual(app.document.querySelector("#player-menu h2").textContent, "Search for subtitles");
+        app.key(10009);
+        assert.strictEqual(app.document.activeElement, app.findButton("Search for subtitles"), "Back returns to the row it came from");
+        app.click("Appearance");
+        assert.strictEqual(app.document.querySelector("#player-menu h2").textContent, "Text overlay appearance");
+        var size = app.findButton("Text size: Medium");
+        size.click();
+        assert.strictEqual(size.textContent, "Text size: Large", "OK steps the value in place");
+        assert.strictEqual(app.saved[app.saved.length - 1].subtitleSize, "large", "and saves it");
+        app.key(10009);
+        assert.strictEqual(app.document.activeElement, app.findButton("Appearance"), "Back returns to Appearance");
+    } finally { app.dom.window.close(); }
+}
+
+async function theCurrentTrackIsNotRestarted() {
+    var app = playerFixture();
+    try {
+        await app.settle();
+        app.click("Audio");
+        app.document.activeElement.click();
+        await app.settle();
+        assert.strictEqual(app.starts(), 1, "Choosing the current track changes nothing");
+        assert(!app.document.getElementById("player-menu"), "and closes the menu");
+        assert.strictEqual(app.document.activeElement, app.findButton("Audio"), "with focus back on its button");
+        app.click("Subtitles");
+        app.click("Subtitles off");
+        await app.settle();
+        assert.strictEqual(app.starts(), 2, "Another choice restarts where it is");
     } finally { app.dom.window.close(); }
 }
 
@@ -405,7 +521,9 @@ async function deviceTracksAreASubList() {
         var device = app.findButton("Device tracks");
         assert(/menu-has-sub/.test(device.className), "Device tracks has the indicator class");
         var nested = app.document.querySelector(".native-tracks button");
-        assert(nested && /menu-sub-item/.test(nested.className), "Device track entries are sub-items");
+        assert(nested && app.document.querySelector(".native-tracks").hidden, "Device track entries stay folded until asked for");
+        device.click();
+        assert(!app.document.querySelector(".native-tracks").hidden, "Device tracks unfolds them in place");
     } finally { app.dom.window.close(); }
 }
 
@@ -464,17 +582,13 @@ async function upNextAndTracks() {
         assert(app.document.querySelector(".up-next-countdown"), "Up Next shows its countdown");
 
         app.click("Audio");
-        assert(app.findButton("English"), "Tracks open on a language-selection step");
-        assert(app.findButton("Other languages"), "Other languages remain discoverable");
-        assert(app.findButton("Subtitles off"), "Subtitles off is available from the menu");
-        app.click("English");
-        assert(app.findButton("English — Stereo"), "A language step lists tracks within that language");
+        assert(app.findButton("English — Stereo"), "Tracks in the viewer's language come first");
+        assert(app.findButton("French · AAC"), "Other languages remain discoverable");
+        assert(!app.findButton("Subtitles off"), "Subtitles off belongs to the Subtitles menu");
         assert(!app.findButton("Back to languages") && !app.findButton("Close menu"), "Back is the remote's job");
         app.key(10009);
-        app.click("Other languages");
-        assert(app.findButton("French"), "Other languages opens the remaining language choices");
-        app.click("French");
-        assert(app.findButton("French"), "The selected language step lists its matching track");
+        app.click("Subtitles");
+        assert(app.findButton("Subtitles off"), "Subtitles off is available from the menu");
     } finally { app.dom.window.close(); }
 }
 
@@ -520,8 +634,206 @@ async function timingStatsAndErrors() {
     } finally { app.dom.window.close(); }
 }
 
+// A track PMS will not send as text (embedded: HTTP 501) offers no overlay; the one it will, does.
+async function onlySidecarTextOffersTheOverlay() {
+    var app = playerFixture({ streams: [
+        { id: 11, streamType: 2, language: "English", languageCode: "eng", displayTitle: "English", codec: "aac", selected: true },
+        { id: 21, streamType: 3, index: 2, language: "English", languageCode: "eng", displayTitle: "English", extendedDisplayTitle: "English (SRT)", codec: "srt", selected: true },
+        { id: 22, streamType: 3, key: "/library/streams/22", language: "English", languageCode: "eng", displayTitle: "English", extendedDisplayTitle: "English (SRT External)", codec: "srt" },
+        { id: 23, streamType: 3, index: 3, language: "English", languageCode: "eng", displayTitle: "English SDH", codec: "ass" }
+    ], subtitleFile: "1\n00:00:45,000 --> 00:00:46,000\nSynthetic" });
+    try {
+        app.click("Subtitles");
+        assert(app.findButton("English (SRT)"), "Two tracks that read the same get Plex's long titles");
+        assert(app.findButton("English (SRT External)"));
+        app.click("Appearance");
+        app.click("Text overlay: Off");
+        assert.deepStrictEqual(rowLabels(app.document.getElementById("player-menu")), ["English (SRT External)"],
+            "Embedded text cannot be fetched, so only a sidecar is offered");
+    } finally { app.dom.window.close(); }
+}
+
+// A subtitle file that does not load costs the subtitle, not the viewing.
+async function aFailedOverlayKeepsPlaying() {
+    var app = playerFixture({ streams: [
+        { id: 22, streamType: 3, key: "/library/streams/22", language: "English", languageCode: "eng", displayTitle: "English", codec: "srt" }
+    ], subtitleError: "Plex refused the subtitle (HTTP 404)." });
+    try {
+        await app.settle();
+        app.click("Subtitles");
+        app.click("Appearance");
+        app.click("Text overlay: Off");
+        app.click("English");
+        await app.settle();
+        assert.strictEqual(app.document.querySelector(".playback-error"), null, "No playback problem panel over a playing video");
+        assert.strictEqual(app.starts(), 1, "The stream is not restarted");
+        assert(/HTTP 404/.test(app.document.getElementById("status").textContent), "The viewer is told");
+    } finally { app.dom.window.close(); }
+}
+
+// Plex auto-selects forced tracks. The menu says what that means and lists the tracks with all the dialogue first.
+async function aForcedTrackIsExplained() {
+    var english = { streamType: 3, language: "English", languageCode: "eng", codec: "srt" };
+    var streams = [{ id: 11, streamType: 2, language: "English", languageCode: "eng", displayTitle: "English", codec: "aac", selected: true },
+        Object.assign({ id: 21, displayTitle: "English Forced", forced: true, selected: true }, english),
+        Object.assign({ id: 22, displayTitle: "English" }, english),
+        Object.assign({ id: 23, displayTitle: "English SDH", hearingImpaired: true }, english)];
+    function note(app) { return app.document.querySelector("#player-menu .subtitle-partial-note"); }
+    var app = playerFixture({ streams: streams });
+    try {
+        app.click("Subtitles");
+        assert(note(app) && /English · Forced/.test(note(app).textContent), "The menu says the forced track is on and what it leaves out");
+        var names = Array.prototype.map.call(app.document.querySelectorAll("#player-menu button"), function (control) { return control.textContent.trim(); });
+        assert(names.indexOf("English") < names.indexOf("English · SDH"), names.join(", "));
+    } finally { app.dom.window.close(); }
+    var full = playerFixture({ streams: [streams[0], Object.assign({}, streams[2], { id: 21 }), streams[3]] });
+    try {
+        full.click("Subtitles");
+        assert.strictEqual(note(full), null, "A track with the dialogue needs no explaining");
+    } finally { full.dom.window.close(); }
+    var only = playerFixture({ streams: [streams[0], streams[1]] });
+    try {
+        only.click("Subtitles");
+        assert.strictEqual(note(only), null, "With no fuller track there is nothing to point the viewer at");
+    } finally { only.dom.window.close(); }
+}
+
+// Plex's forced pick plays until the viewer changes it, and a pick carries to the show's other episodes.
+function partialStreams(audioCode) {
+    var english = { streamType: 3, language: "English", languageCode: "eng", codec: "srt" };
+    return [{ id: 11, streamType: 2, languageCode: audioCode, language: audioCode, displayTitle: audioCode, codec: "aac", selected: true },
+        Object.assign({ id: 21, displayTitle: "English Forced", forced: true, selected: true }, english),
+        Object.assign({ id: 22, displayTitle: "English" }, english),
+        Object.assign({ id: 23, displayTitle: "English SDH", hearingImpaired: true }, english)];
+}
+function checkedTracks(app) {
+    return Array.prototype.map.call(app.document.querySelectorAll('#player-menu button[aria-pressed="true"]'), function (node) { return node.textContent.trim(); });
+}
+async function aPartialDefaultStaysUntilPicked() {
+    var app = playerFixture({ streams: partialStreams("eng"), liveSelection: true });
+    try {
+        await app.settle();
+        assert.strictEqual(app.playerSettings[0].subtitleId, undefined, "The start keeps Plex's selection, with no write");
+        assert.deepStrictEqual(savedMemory(app), []);
+        app.click("Subtitles");
+        assert.deepStrictEqual(checkedTracks(app), ["English · Forced"]);
+        assert(app.document.querySelector("#player-menu .subtitle-partial-note"), "The note points at the fuller track");
+        app.click("English");
+        await app.settle();
+        assert.deepStrictEqual(savedMemory(app), [{ show: "synthetic-show", subtitle: "eng" }], "A pick is remembered for the show");
+        assert.strictEqual(app.playerSettings[1].subtitleId, 22);
+        assert.strictEqual(app.playerSettings[1].automaticTracks, false, "A menu pick stops on a refusal, as it always has");
+        app.click("Subtitles");
+        assert.deepStrictEqual(checkedTracks(app), ["English"]);
+        app.click("Subtitles off");
+        await app.settle();
+        assert.strictEqual(savedMemory(app)[0].subtitle, "off", "Off is remembered too");
+    } finally { app.dom.window.close(); }
+    var next = playerFixture({ streams: partialStreams("eng"), liveSelection: true, memory: [{ show: "synthetic-show", subtitle: "eng" }] });
+    try {
+        await next.settle();
+        assert.strictEqual(next.playerSettings[0].subtitleId, 22, "Another episode of that show starts on the picked track");
+        assert.strictEqual(next.playerSettings[0].automaticTracks, true, "and a refusal must not stop the viewing");
+        next.click("Subtitles");
+        assert.deepStrictEqual(checkedTracks(next), ["English"]);
+    } finally { next.dom.window.close(); }
+    var back = playerFixture({ streams: partialStreams("eng"), liveSelection: true, memory: [{ show: "synthetic-show", subtitle: "eng:forced" }] });
+    try {
+        await back.settle();
+        assert.strictEqual(back.playerSettings[0].subtitleId, undefined, "Another episode of that show keeps Plex's forced pick, with no write");
+        back.click("Subtitles");
+        assert.deepStrictEqual(checkedTracks(back), ["English · Forced"]);
+        assert(back.document.querySelector("#player-menu .subtitle-partial-note"), "and the note explains it");
+    } finally { back.dom.window.close(); }
+    var off = playerFixture({ streams: partialStreams("eng"), liveSelection: true, memory: [{ show: "synthetic-show", subtitle: "off" }] });
+    try {
+        await off.settle();
+        assert.strictEqual(off.playerSettings[0].subtitleId, 0, "Off stays off in the show's other episodes");
+        off.click("Subtitles");
+        assert.deepStrictEqual(checkedTracks(off), ["Subtitles off"]);
+    } finally { off.dom.window.close(); }
+    var foreign = playerFixture({ streams: partialStreams("deu"), liveSelection: true });
+    try {
+        await foreign.settle();
+        assert.strictEqual(foreign.playerSettings[0].subtitleId, undefined, "Over foreign audio the forced track translates, so it stays");
+    } finally { foreign.dom.window.close(); }
+    var explicit = playerFixture({ streams: partialStreams("eng"), liveSelection: true, audioId: 11, subtitleId: 21 });
+    try {
+        await explicit.settle();
+        assert.strictEqual(explicit.playerSettings[0].subtitleId, 21, "A pick made in this playback is not overridden");
+    } finally { explicit.dom.window.close(); }
+}
+
+// Plex remembers a movie's pick for its file, so this TV keeps nothing for it.
+async function aMovieKeepsWhatPlexRemembers() {
+    var app = playerFixture({ streams: partialStreams("eng"), liveSelection: true, movie: true });
+    try {
+        await app.settle();
+        assert.strictEqual(app.playerSettings[0].subtitleId, undefined);
+        app.click("Subtitles");
+        app.click("English");
+        await app.settle();
+        assert.strictEqual(app.playerSettings[1].subtitleId, 22);
+        assert.deepStrictEqual(savedMemory(app), []);
+        app.click("Subtitles");
+        assert.strictEqual(app.findButton("Reset to default tracks"), null);
+    } finally { app.dom.window.close(); }
+}
+
+// AVPlay reports the time about twice a second, so a cue that starts or ends between two reports is drawn on a timer.
+async function overlayCuesChangeBetweenTimeReports() {
+    var app = playerFixture({ cues: [{ start: 45200, end: 45400, text: "Between reports" }] });
+    try {
+        var text = app.document.getElementById("subtitle-text");
+        app.callbacks.avplay.onEvent({ type: "time", position: 45000, duration: item.duration });
+        assert.strictEqual(text.textContent, "");
+        app.runTimers(200);
+        assert.strictEqual(text.textContent, "Between reports", "The cue appears at its start, not at the next report");
+        app.callbacks.avplay.onEvent({ type: "time", position: 45300, duration: item.duration });
+        assert.strictEqual(text.textContent, "Between reports");
+        app.runTimers(100);
+        assert.strictEqual(text.textContent, "", "And goes at its end");
+        // A later report replaces the waiting change, so a seek cannot bring back a cue from where it left.
+        app.callbacks.avplay.onEvent({ type: "time", position: 45000, duration: item.duration });
+        app.callbacks.avplay.onEvent({ type: "time", position: 50000, duration: item.duration });
+        app.runTimers(200);
+        assert.strictEqual(text.textContent, "");
+    } finally { app.dom.window.close(); }
+    var delayed = playerFixture({ cues: [{ start: 45200, end: 45400, text: "Later" }], initialDelay: 100 });
+    try {
+        var shown = delayed.document.getElementById("subtitle-text");
+        delayed.callbacks.avplay.onEvent({ type: "time", position: 45000, duration: item.duration });
+        delayed.runTimers(300);
+        assert.strictEqual(shown.textContent, "Later", "The viewer's delay moves the change too");
+    } finally { delayed.dom.window.close(); }
+}
+
+// Right-to-left text takes its direction from the text itself.
+async function subtitlesFollowTheirOwnDirection() {
+    var app = playerFixture();
+    try {
+        assert.strictEqual(app.document.getElementById("subtitle-text").getAttribute("dir"), "auto");
+    } finally { app.dom.window.close(); }
+}
+
+// PMS answered that it will not burn the track: the viewer hears about it instead of watching for text that never comes.
+async function aRefusedBurnIsAnnounced() {
+    var app = playerFixture({ startResult: { subtitleRefused: true } });
+    try {
+        await app.settle();
+        var status = app.document.getElementById("status");
+        assert(/could not add this subtitle/.test(status.textContent), "The start does not wipe it: " + status.textContent);
+        assert.strictEqual(app.document.querySelector(".playback-error"), null, "The video keeps playing");
+    } finally { app.dom.window.close(); }
+    var fine = playerFixture({ startResult: { subtitleRefused: false } });
+    try {
+        await fine.settle();
+        assert.strictEqual(fine.document.getElementById("status").textContent, "");
+    } finally { fine.dom.window.close(); }
+}
+
 async function subtitleTimingUsesTrackBounds() {
-    var sidecar = playerFixture({ cues: [], subtitleSidecar: true, initialDelay: 60000 });
+    var sidecar = playerFixture({ cues: [], initialDelay: 60000 });
     try {
         sidecar.click("Subtitles");
         sidecar.click("Subtitle timing");
@@ -533,7 +845,7 @@ async function subtitleTimingUsesTrackBounds() {
             "Sidecar timing can move earlier by one 100 ms step");
     } finally { sidecar.dom.window.close(); }
 
-    var sidecarMinimum = playerFixture({ cues: [], subtitleSidecar: true, initialDelay: -60000 });
+    var sidecarMinimum = playerFixture({ cues: [], initialDelay: -60000 });
     try {
         sidecarMinimum.click("Subtitles");
         sidecarMinimum.click("Subtitle timing");
@@ -545,18 +857,10 @@ async function subtitleTimingUsesTrackBounds() {
             "Sidecar timing can move later by one 100 ms step");
     } finally { sidecarMinimum.dom.window.close(); }
 
-    var embedded = playerFixture({ cues: [], subtitleSidecar: false, initialDelay: 0 });
-    try {
-        embedded.click("Subtitles");
-        embedded.click("Subtitle timing");
-        embedded.key(37);
-        assert.strictEqual(embedded.document.querySelector(".subtitle-timing-value").textContent, "0.0 s",
-            "Embedded text subtitles cannot advance before their not-yet-read cues");
-    } finally { embedded.dom.window.close(); }
 }
 
 async function subtitleTimingZeroDetentAndTrackAvailability() {
-    var sidecar = playerFixture({ cues: [], subtitleSidecar: true, initialDelay: 100 });
+    var sidecar = playerFixture({ cues: [], initialDelay: 100 });
     try {
         sidecar.click("Subtitles");
         sidecar.click("Subtitle timing");
@@ -580,7 +884,7 @@ async function subtitleTimingZeroDetentAndTrackAvailability() {
 }
 
 async function failedPlayerRecoveryRestartsThePipeline() {
-    var app = playerFixture({ cues: [], subtitleSidecar: true, audioId: 11, subtitleId: 21, failFirstStart: true });
+    var app = playerFixture({ cues: [], audioId: 11, subtitleId: 21, failFirstStart: true });
     try {
         await app.settle();
         assert(app.document.querySelector(".playback-error"), "A failed startup offers recovery");
@@ -592,7 +896,6 @@ async function failedPlayerRecoveryRestartsThePipeline() {
         assert.strictEqual(app.playerSettings[1].subtitleId, 21, "Retry preserves the selected subtitle stream");
         assert.strictEqual(app.playerSettings[1].offset, 45000, "Retry preserves the failed session position");
         assert.strictEqual(app.adapters(), 2, "Retry allocates a fresh AVPlay adapter");
-        assert.strictEqual(app.playerSettings[1].subtitleSidecar, true, "Retry preserves sidecar identity");
         app.callbacks.avplay.onEvent({ type: "error", detail: "Synthetic decoder failure" });
         app.click("Restart");
         await app.settle();
@@ -705,7 +1008,7 @@ async function moreMenuOrder() {
     try {
         await app.settle();
         app.click("More");
-        assert.deepStrictEqual(rowLabels(app.document.getElementById("player-menu")), ["Quality and version", "Minimum buffer: 1 s",
+        assert.deepStrictEqual(rowLabels(app.document.getElementById("player-menu")), ["Quality and version: 1080p – 8 Mbps", "Minimum buffer: 1 s",
             "Intro and credits", "Stop and return to details", "Stats for nerds"],
             "Quality first, stats last; no Markers, Info (the HUD has its own) or Close menu");
         app.key(10009);
@@ -1135,9 +1438,7 @@ async function aTrackPickIsRememberedForTheShow() {
         await app.settle();
         assert.strictEqual(app.playerSettings[0].audioId, undefined, "Without a memory the server's defaults are used");
         app.click("Audio");
-        app.click("Other languages");
-        app.click("French");
-        app.click("French");
+        app.click("French · AAC");
         await app.settle();
         assert.deepStrictEqual(savedMemory(app), [{ show: "synthetic-show", audio: "fra" }],
             "An audio pick is kept for the show by language, with no subtitle choice");
@@ -1250,13 +1551,24 @@ async function run() {
     await playerControlsShareOneRow();
     await skipButtonStartsTheRightGroup();
     await downClosesTheChapterStrip();
+    await theControlsRowIsEnteredAtPause();
+    await okOnTheTimelinePauses();
+    await okOnTheTimelineDuringAStartWaits();
     await trackMenusAreIndependentAndOnTheLeft();
-    await subItemsAreMarked();
+    await trackMenusAreOneFlatList();
     await deviceTracksAreASubList();
     await rapidPressesMakeOneSeek();
     await timedOutSeekClosesItsProblemWhenItLands();
     await upNextAndTracks();
     await timingStatsAndErrors();
+    await onlySidecarTextOffersTheOverlay();
+    await aFailedOverlayKeepsPlaying();
+    await aForcedTrackIsExplained();
+    await aPartialDefaultStaysUntilPicked();
+    await aMovieKeepsWhatPlexRemembers();
+    await overlayCuesChangeBetweenTimeReports();
+    await subtitlesFollowTheirOwnDirection();
+    await aRefusedBurnIsAnnounced();
     await subtitleTimingUsesTrackBounds();
     await subtitleTimingZeroDetentAndTrackAvailability();
     await failedPlayerRecoveryRestartsThePipeline();

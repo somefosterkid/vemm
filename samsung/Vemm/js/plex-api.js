@@ -789,7 +789,7 @@
             identity: function () { return get("/identity"); },
             getMetadata: function (id) {
                 return get("/library/metadata/" + key(id), "GET", {
-                    includeChapters: 1, includeMarkers: 1, includeExtras: 1, includeRelated: 1, includeOnDeck: 1
+                    includeChapters: 1, includeMarkers: 1, includeExtras: 1, includeOnDeck: 1
                 }).then(function (container) {
                     var metadata = listFrom(container, "Metadata");
                     if (!metadata.length) { throw new Error("This item is no longer available."); }
@@ -918,32 +918,13 @@
                     "X-Plex-Container-Size": 50, "X-Plex-Container-Start": start || 0
                 });
             },
-            personLibraryIndex: function (personId) {
-                var index = {};
-                var limit = 10000;
-                var self = this;
-                function page(start) {
-                    return self.getPerson(null, personId, start).then(function (container) {
-                        var rows = listFrom(container, "Metadata");
-                        if (rows.length > 50 || container.offset !== undefined && Number(container.offset) !== start) {
-                            throw new Error("Plex returned an invalid person-library page.");
-                        }
-                        var entries = localCatalogueIndex(rows);
-                        Object.keys(entries).forEach(function (guid) {
-                            if (!Object.prototype.hasOwnProperty.call(index, guid)) { index[guid] = entries[guid]; }
-                        });
-                        var next = start + rows.length;
-                        var total = container.totalSize === undefined || container.totalSize === null ?
-                            NaN : Number(container.totalSize);
-                        var more = isFinite(total) ? next < total : rows.length === 50;
-                        if (more && !rows.length) { throw new Error("Plex returned an incomplete person-library page."); }
-                        if (more && next < limit) {
-                            return page(next);
-                        }
-                        return { index: index, complete: !more };
-                    });
-                }
-                return page(0);
+            // The people on several titles in one read, without what a caption has no use for (about half the bytes for
+            // a film; a long-running show is mostly its 200 people). getPerson's items have no character names.
+            titleCredits: function (ids) {
+                return get("/library/metadata/" + ids.map(key).join(","), "GET", {
+                    excludeElements: "Media,Genre,Country,Guid,Rating,Image,UltraBlurColors,CommonSenseMedia,Field",
+                    excludeFields: "summary,tagline,studio,slug,art,theme"
+                }).then(function (container) { return listFrom(container, "Metadata"); });
             },
             search: function (query) {
                 if (!String(query || "").trim() || String(query).length > 200) {

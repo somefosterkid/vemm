@@ -56,7 +56,7 @@ async function run() {
         } else { return Promise.resolve({ ok: false, status: 404 }); }
         return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve({ MediaContainer: container }); } });
     };
-    ["js/plex-api.js", "js/preferences.js", "js/session.js", "js/recents.js", "js/home-hero.js", "js/item-menu.js",
+    ["js/plex-api.js", "js/preferences.js", "js/session.js", "js/recents.js", "js/home-hero.js", "js/item-menu.js", "js/episodes.js",
         "js/search-ui.js", "js/i18n.js", "main.js"].forEach(function (file) {
         window.eval(fs.readFileSync(path.join(app, file), "utf8"));
     });
@@ -98,9 +98,17 @@ async function run() {
         if (this.parentNode && has(this.parentNode, "letter-bar")) { return rect(1850, 90 + at(this) * 36, 60, 30); }
         return rect(0, 0, 0, 0);
     };
+    // A menu list: 64px rows in a 320px view.
+    function menuRows(list) { return Array.from(list.querySelectorAll("button")); }
+    function closestList(node) { return node.closest && node.closest(".menu-list"); }
     Object.defineProperty(window.HTMLElement.prototype, "offsetTop", { get: function () {
+        if (closestList(this) && this.tagName === "BUTTON") { return menuRows(closestList(this)).indexOf(this) * 64; }
         return has(this, "media-card") && this.parentNode && this.parentNode.id === "item-list" ? 200 + Math.floor(at(this) / 6) * 400 : 0;
     } });
+    Object.defineProperty(window.HTMLElement.prototype, "offsetHeight", { get: function () {
+        return has(this, "menu-list") ? menuRows(this).length * 64 : closestList(this) && this.tagName === "BUTTON" ? 64 : 0;
+    } });
+    Object.defineProperty(window.HTMLElement.prototype, "clientHeight", { get: function () { return has(this, "menu-view") ? 320 : 0; } });
     function press(keyCode) { doc.dispatchEvent(new window.KeyboardEvent("keydown", { keyCode: keyCode, bubbles: true, cancelable: true })); }
     async function settle() {
         for (var i = 0; i < 40; i += 1) { await Promise.resolve(); }
@@ -118,6 +126,36 @@ async function run() {
     try {
         doc.querySelector('input[name="server"]').value = "https://pms.synthetic.invalid";
         click("Connect");
+        await settle();
+
+        // A long menu moves as one layer: the focused row centred, stopping at the ends, the page itself still.
+        click("Account");
+        click("Settings");
+        click("Playback");
+        var list = doc.querySelector(".menu-list");
+        var view = list.parentNode;
+        function listY() {
+            var moved = /translate3d\(0,\s*(-?[\d.]+)px/.exec(list.style.transform);
+            return moved ? -Number(moved[1]) : 0;
+        }
+        var listRows = menuRows(list);
+        var room = listRows.length * 64 - 320;
+        assert.strictEqual(doc.activeElement, listRows[0], "Focus starts on the first row");
+        assert.strictEqual(listY(), 0,"The first rows cannot be centred; the list stops at its top");
+        assert.strictEqual(view.className, "menu-view more-below", "An edge fades where the list continues");
+        press(38);
+        assert.strictEqual(doc.activeElement, listRows[listRows.length - 1], "Up on the first row wraps to the last");
+        assert.strictEqual(listY(), room, "The last row stops at the bottom");
+        assert.strictEqual(view.className, "menu-view more-above");
+        assert.strictEqual(list.style.transition, "none", "A wrap jumps: the row must be in view before the browser looks for it");
+        press(38);
+        press(38);
+        press(38);
+        assert.strictEqual(listY(), listRows[listRows.length - 4].offsetTop + 32 - 160, "Moving back up centres the row");
+        assert.strictEqual(view.className, "menu-view more-above more-below");
+        assert.strictEqual(list.style.transition, "", "A one-row step glides");
+        assert.strictEqual(screen.scrollTop, 0, "The page never scrolls behind a menu");
+        press(27); press(27);
         await settle();
 
         // Home: the focused shelf is centred; the first stops under the header and the last at the window's bottom.

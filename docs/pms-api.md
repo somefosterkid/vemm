@@ -153,7 +153,7 @@ spec's "Media Queries" section documents the full query language.
 - **Paging gotcha:** a query-param `X-Plex-Container-Size` WITHOUT `Start` is silently ignored —
   always send both (the client does), or use the headers. Header `Size: 0` = count-only probe.
   `totalSize` is only present on paged responses.
-- **Payload slimming:** `excludeElements=Media` etc. per the spec (not used yet).
+- **Payload slimming:** `excludeElements=Media,...` and `excludeFields=summary,...` work on `/library/metadata/{ids}` (measured 2026-11-01, used by `titleCredits`). `includeElements` and `includeFields` change nothing.
 
 ---
 
@@ -216,7 +216,8 @@ the spec but **this server does not emit it on `Role[]`** — treat 0 as unknown
   person with no career.
 - **Unlike the profile beside it, `/credits` REQUIRES a token** (measured 2026-09-05): with no
   `X-Plex-Token` it answers `401 {"error":"Unauthorized","message":"You must provide a token!"}`,
-  where `/library/people/{tagKey}` answers 200 unauthenticated. And the token it wants is the
+  where `/library/people/{tagKey}` answered 200 unauthenticated (it answers 401 too when asked again on
+  2026-11-01, so both now need the token). And the token it wants is the
   plex.tv **account** token, not a PMS server token — which is what puts the whole filmography out
   of reach of every automated boot in this repo: those sign in with `/tmp/plxnative-token`, a
   server token, and leave `Session::account_token` empty. It is the same wall
@@ -230,12 +231,14 @@ the spec but **this server does not emit it on `Role[]`** — treat 0 as unknown
   call when you want one section.
 - **`viewGroup` on that container is unreliable — group by each row's own `type`.** Verified:
   person 6059's response carries `viewGroup:"movie"` over five `movie` rows *and* one `show`.
+- **Who they played is only on the title's full answer** (measured 2026-11-01). `/media` and `?actor=` rows carry a few `Role` entries with `tag` alone, and asking for more with `includeRole`/`includeRoles`/`includeElements` changes nothing. `GET /library/metadata/{a},{b},{c}` reads several titles in one request (a missing key is left out; all missing is a 404), and each has its whole `Role[]` with `id`, `tagKey` and `role`, plus `Director[]`, `Writer[]`, `Producer[]` with `id`. Measured on four films: 58 KB, 31 KB without `Media`, `Genre`, `Summary` and the like, 50 ms. A long-running show is mostly its people: six shows with `Role[]` of up to 200 were 187 KB, 180 KB slimmed, 70-115 ms. `Role[]` is cut at 200, so a minor guest may not be on it. Match by `id` or `tagKey`: names are not unique.
 - **Per-section listing:** `GET /library/sections/{key}/all?actor=<id>` (the `filter` string on
   the tag is exactly this query, ready-made).
 - **The whole actor list of a section:** `GET /library/sections/{key}/actor` → `Directory[]` of
   `{key: "<id>", title, thumb, fastKey: "/library/sections/2/all?actor=691"}` (51 on Movies, 56
   on TV Shows here). NB the rows key the id as **`key`/`title`**, not `id`/`tag` — a different
   shape from the tag arrays above. This is the *Categories → by Actor* browse axis.
+- **Headshots are square or taller, never round** (measured 2026-11-01 on 23 of them through `/photo/:/transcode?width=440&height=440&minSize=1`: 22 square, one 3:4; 11-40 KB, 50-590 ms; small originals are not enlarged, so 300x300 stays 300x300). About 10% of a long cast has no `thumb`, and a few come from `image.tmdb.org`.
 - **Headshots are absolute `https://metadata-static.plex.tv/…` URLs**. They still render through
   the PMS photo transcoder rather than through the app's PMS-origin HTTP client: `image_transcode_path`
   passes the whole URL as `url=` to `/photo/:/transcode` and **the server does the TLS** — the
@@ -750,6 +753,24 @@ subsequent direct-play need, so the feature costs zero extra round-trips.
   for the next window while the second-to-last item of the current one plays.
 - Progress goes to `/:/timeline` with `playQueueID` and the current `playQueueItemID`, as for any queue.
 
+### The show page's suggested episode (verified live 2026-11-01, PMS 1.43)
+
+- `GET /library/metadata/{show}?includeOnDeck=1` returns `OnDeck.Metadata` with `ratingKey`, `parentRatingKey`, `parentIndex`,
+  `index`, and `viewOffset` when it is in progress. In progress wins, wherever it is, even in an early season with later
+  seasons partly watched. A completely unwatched show answers with its first episode of its first season (that may not be
+  season 1). **A finished show has no `OnDeck`**; nor does one whose only unwatched episodes are Specials.
+- `GET /library/metadata/{show}/children` lists Specials first (`index: 0`); its `size` is one more than `totalSize` and the
+  number of `Metadata` entries, because of an "All episodes" `Directory` entry. Each season has `leafCount` and
+  `viewedLeafCount`, and each of a season's `/children` episodes has `viewCount` and `viewOffset` only when set. Paged by 50 as usual.
+- `GET /transcode/sessions/{id}` answers 404 for a session that does not exist.
+- `includeRelated=1` is most of a metadata answer and of its time: 122 KB of 175 KB for one show (54 ms against 21 ms), 67 KB
+  of 83 KB for one movie (59 ms against 12 ms). `Role[]` is next (a long-running show lists 200, about 40 KB, with no way to ask for
+  fewer), then a show's `OnDeck` (about 10 KB). Two answers in a row are byte-identical, so comparing them is meaningful. The app
+  asks for related titles separately (`/hubs/metadata/{id}/related`), so it does not send `includeRelated`.
+- A list item (`/library/sections/{id}/all`, hubs) has what a details hero needs (`summary`, `art`, `thumb`, `year`, `contentRating`,
+  `duration`, `viewOffset`, `viewCount`, `leafCount`, `viewedLeafCount`, the flat rating pair, `Genre` and `Role` cut short), and not
+  `OnDeck`, `Extras`, `Chapter`, `Marker`, `Rating[]`, `Guid[]`, or a `Part`'s `Stream[]`.
+
 ### Show chain (verified against a show, ratingKey 1857)
 
 ```
@@ -1249,6 +1270,33 @@ stopped and restarted two seconds later, and the start's `PUT .../parts/<part>?a
 named the part's EMBEDDED English track `<E>` (re-picked from the page's pre-playback copy of the
 item) while the server's own metadata said `Subtitle Stream: <S>` — moving the selection to a real
 stream discards the download exactly as `0` does, so a start must plan from the server's current selection.
+
+### How a subtitle reaches the screen (measured on PMS 1.43, 2026-11)
+
+- **Text as a file:** `GET /library/streams/{id}?encoding=utf-8&format=srt` serves a sidecar or a download (the
+  stream has a `key`). A track inside the video file has no `key` and answers **501 Not Implemented**, whatever its
+  codec, so a client cannot draw embedded text from this route. Sidecars decode to valid UTF-8 this way, CJK and
+  Cyrillic included. Real files can hold a zero-length cue, so a parser must skip a bad cue, not the file.
+- **Which track burns:** a start cannot ask for a track. Decisions naming another track, by `subtitleStreamID` or a
+  dozen other spellings, all answered with the part's selected one, and `audioStreamID` is ignored the same way. The
+  start endpoint agrees: a conversion naming another track showed none of that track's text in the decoded frames.
+  `PUT /library/parts` is the only way to choose, so playing anything but the selected track is a write, and a
+  background start that writes nothing can only hold the selected track. `subtitles=none` is honoured.
+- **The per-stream answer** to a conversion with `subtitles=burn` is `decision: "burn", location: "segments-av",
+  burn: "1"`. Seen for embedded srt, ass, pgs and vobsub and for sidecar and downloaded srt; decoding the output
+  showed the text in the frames at the cue's time, with `offset=` too. With `subtitles=none` it is `decision: "ignore"`.
+  Unmeasured, because they were never the selected track and selecting one is a write: mov_text, eia_608, xsub.
+- **Other shapes:** with the Generic profile `subtitles=sidecar` and `=embedded` answer `decision: "unavailable"`.
+  `subtitles=segmented` plus `add-transcode-target(type=subtitleProfile&context=streaming&protocol=hls&container=webvtt&subtitleCodec=webvtt)`
+  answers `decision: "transcode", location: "segments-subs", format: "webvtt"`: the master playlist gains an
+  `EXT-X-MEDIA:TYPE=SUBTITLES` rendition of 1 s WebVTT segments holding the selected embedded track's text on the
+  title's clock. Unused so far, and what AVPlay does with it is unmeasured. `/video/:/transcode/universal/subtitles`
+  answered 400 or 404 to every shape tried.
+- **What PMS selects by itself** (an account showing subtitles "with foreign audio"): foreign audio selects the
+  language's regular track. Same-language audio selects nothing, unless the file has a forced track or one marked
+  default that only carries signs and songs, which it selects. Such a track can be a handful of cues in a whole
+  episode, against well over a thousand in its regular track. So "selected" does not mean "shows the dialogue".
+  Plex flags forced and SDH tracks only sometimes; many say so only in `title`.
 
 `tests/mock_pms.py` (`MockPms.subtitle_search`) models this section — the 3-letter 500, the empty
 answer, single-use candidate keys, and an install that creates a NEW selected external stream with

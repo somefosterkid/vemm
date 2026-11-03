@@ -72,7 +72,6 @@
     var ringPatient = false;
     var ringTimer = null;
     var hudFocus = null;
-    var scrubReturnFocus = null;
     var nextTimer = null;
     var playerClosing = false;
     var lastAction = 0;
@@ -113,6 +112,7 @@
     var subtitleTimingDetentUntil = 0;
     var upNextGeneration = 0;
     var externalCues = null;
+    var cueTimer = null;
     var musicQueue = null;
     var musicLoading = false;
     var playlistQueue = null;
@@ -126,9 +126,9 @@
     var viewClients = [];
     var suspendedView = null;
     var foregroundRecovery = null;
-    // The background start of the focused Play control (preloadOnFocus).
+    // The background start of a focused Play control (preloadOnFocus) or of a details page (holdOnFocus).
     var preload = window.VemmPreload ? window.VemmPreload.create() :
-        { arm: function () {}, cancel: function () {}, take: function () { return null; } };
+        { arm: function () {}, hold: function () {}, cancel: function () {}, take: function () { return null; } };
     var subtitleSearchGeneration = 0;
     var preferences = { quality: "original", nextEpisode: "countdown", language: "en", continueAction: "details",
         skipInterval: 10, subtitleSize: "medium", subtitlePosition: "low", subtitleColor: "white",
@@ -201,6 +201,13 @@
         return text;
     }
     var pendingRestore = null;
+    var castPages = null;
+    // A page's own Up and Down, and Left and Right away from a row (js/cast-ui.js); true when it dealt with the key.
+    var pageStep = null;
+    // On a show's page: reopens it, for when playback started there stops (startPlayer, stopPlayer).
+    var playReturn = null;
+    var detailMemory = [];
+    var aheadTimer = null;
     // Home moves vertically with a GPU transform on .home-track instead of scrolling the screen:
     // native scrolling repaints the whole Home on Tizen's older engines (50-150 ms per shelf on a
     // 2017 set), while translate3d is a compositor move (one 16.7 ms frame).
@@ -266,7 +273,7 @@
             confirmExit();
             return;
         }
-        pendingRestore = previous;
+        pendingRestore = previous.afterPlay ? null : previous;
         previous.restore();
     }
 
@@ -297,6 +304,7 @@
     // Artwork preloaded from the TV's own store is keyed by server and outlives them; dropSavedArtwork() releases it.
     function resetServerCaches() {
         homeCache = null;
+        forgetDetails();
         forgetListings();
         artworkKeys.slice().forEach(function (key) { if (!artworkCache[key].preloaded) { releaseArtwork(key); } });
     }
@@ -492,14 +500,13 @@
                 if (item.type === "photo") {
                     var photos = (siblings || [item]).filter(function (entry) { return entry.type === "photo"; });
                     openPhotos(photos, Math.max(0, photos.indexOf(item)), client);
-                } else if (item.type === "season") {
-                    openListing(item.parentTitle || item.title, function (offset) {
-                        return client.getChildren(item.ratingKey, offset);
-                    }, client, 0, null, null, item.parentRatingKey ? { showRatingKey: item.parentRatingKey } : null);
-                } else { openDetail(item.ratingKey, client, item.type === "playlist"); }
+                } else { openDetail(item.ratingKey, client, item.type === "playlist", undefined, item); }
             });
         });
         node.className = "media-card";
+        if (!options.open && ["movie", "show", "episode"].indexOf(item.type) !== -1) {
+            node.addEventListener("focus", function () { fetchAhead(item, client); });
+        }
         if (options.deck && ["movie", "episode", "clip"].indexOf(item.type) !== -1) {
             preloadOnFocus(node, client, function () {
                 return preferences.continueAction === "play" ? cardTarget(item, client, true) : null;
@@ -507,7 +514,8 @@
         }
         var seriesPoster = options.shelf && item.type === "episode" && (item.grandparentThumb || item.parentThumb);
         node.setAttribute("data-shape", !seriesPoster && ["episode", "clip", "photo"].indexOf(item.type) !== -1 ? "landscape" :
-            ["artist", "album", "track", "playlist"].indexOf(item.type) !== -1 ? "square" : "portrait");
+            ["artist", "album", "track", "playlist", "channel"].indexOf(item.type) !== -1 ? "square" : "portrait");
+        if (item.type === "channel") { node.className += " channel-card"; }
         node.vemmCard = { item: item, client: client, options: options };
         var image = element("img", "poster");
         image.alt = item.title || "Media";
@@ -526,12 +534,15 @@
             item.title || item.tag || "Untitled"));
         var episodeNumber = item.type === "episode" && item.parentIndex !== undefined && item.index !== undefined ?
             "S" + item.parentIndex + " E" + item.index : "";
-        var remaining = options.shelf && item.viewOffset && item.duration ?
+        var remaining = (options.shelf || options.listed) && item.viewOffset && item.duration ?
             translate("{minutes} min left", { minutes: Math.max(1, Math.round((item.duration - item.viewOffset) / 60000)) }) : "";
-        node.appendChild(element("span", "card-meta", options.sort && options.sort !== "titleSort" ?
+        node.vemmMeta = element("span", "card-meta", options.caption !== undefined ? options.caption : options.listed ?
+            [episodeNumber, remaining || (item.duration ? durationLabel(item.duration) : "")].filter(Boolean).join(" · ") :
+            options.sort && options.sort !== "titleSort" ?
             sortCardValue(item, options.sort) : item.type === "episode" ?
             [episodeNumber, item.title, remaining].filter(Boolean).join(" · ") : item.type === "playlist" ?
-            translate("{count} items", { count: item.leafCount || 0 }) : remaining || String(item.year || "")));
+            translate("{count} items", { count: item.leafCount || 0 }) : remaining || String(item.year || ""));
+        node.appendChild(node.vemmMeta);
         if (item.viewCount) {
             var watchedMark = element("span", "card-watched", "✓");
             watchedMark.setAttribute("aria-label", translate("Watched"));
@@ -540,7 +551,7 @@
         var shape = node.getAttribute ? node.getAttribute("data-shape") : "portrait";
         node.vemmArt = { image: image, client: client, path: seriesPoster || item.thumb || item.art || item.composite,
             size: shape === "landscape" ? { width: 480, height: 270 } : shape === "square" ? { width: 360, height: 360 } : { width: 240, height: 360 },
-            category: options.shelf ? "home" : options.library ? "library" : undefined };
+            category: options.shelf ? "home" : options.library || options.listed ? "library" : undefined, direct: !!options.direct };
         if (options.lazy) { node.vemmFar = true; } else { showArt(node); }
         return node;
     }
@@ -550,6 +561,12 @@
         var art = node.vemmArt;
         if (node.vemmFar === false) { return; }
         node.vemmFar = false;
+        // A Live TV logo is an address on any server: the picture loads from it as it is, with no download of its own.
+        if (art.direct) {
+            art.image.onerror = function () { art.image.onerror = null; art.image.src = placeholderArt(); };
+            if (art.path) { art.image.src = art.path; }
+            return;
+        }
         queueImage(art.image, art.client, art.path, art.size, undefined, undefined, undefined, art.category);
     }
 
@@ -674,7 +691,8 @@
         stopFeatureTimer();
         var active = document.activeElement;
         if (!stepFeature || !preferences.autoAdvanceFeatures || !active || !active.parentNode ||
-                !/(?:home-navigation|home-feature-actions)/.test(active.parentNode.className || "")) { return; }
+                !/(?:home-navigation|home-feature-actions)/.test(active.parentNode.className || "") &&
+                !hasClass(active, /(?:^| )search-control(?: |$)/)) { return; }
         var generation = viewGeneration;
         featureTimer = setTimeout(function () {
             featureTimer = null;
@@ -685,13 +703,14 @@
     }
 
     function clear(node) {
-        if (node === screen) { homePending = false; preload.cancel(); }
+        if (node === screen) { homePending = false; playReturn = null; clearTimeout(aheadTimer); preload.cancel(); }
         if (node === screen && !player) {
             cancelViewRequests();
         }
         if (node === screen) {
             removeSubtitlePreview();
             stepFeature = null;
+            pageStep = null;
             stopFeatureTimer();
         }
         if (node === screen && viewCleanup) {
@@ -736,6 +755,83 @@
         return section;
     }
 
+    // Every menu's rows sit in one list that moves by a GPU transform (moveMenuList), so a press repaints only the row
+    // focus left and the row it entered, however long the list is.
+    function menuList(parent) {
+        var view = element("div", "menu-view");
+        var list = element("div", "menu-list");
+        view.appendChild(list);
+        parent.appendChild(view);
+        return list;
+    }
+    // A row that opens another list.
+    function opens(row) {
+        row.className += " menu-has-sub";
+        return row;
+    }
+    // The one menu row: the setting on the left, its current value on the right. The ": " is never shown; it keeps the
+    // row's text a sentence.
+    function valueRow(parent, title, value, action, iconName) {
+        var row = button(parent, "", action, true, iconName || "none");
+        var line = element("span", "menu-line");
+        line.appendChild(element("span", "menu-label", title));
+        line.appendChild(element("span", "menu-colon", ": "));
+        row.vemmValue = element("span", "menu-value", value);
+        line.appendChild(row.vemmValue);
+        row.appendChild(line);
+        return row;
+    }
+    function setRowValue(row, value) { row.vemmValue.textContent = value; }
+    // On or off, flipped in place: aria-pressed draws the switch.
+    function setSwitch(row, on) {
+        row.setAttribute("aria-pressed", String(on));
+        setRowValue(row, translate(on ? "On" : "Off"));
+    }
+    function switchRow(parent, title, on, action) {
+        var row = valueRow(parent, title, "", action);
+        row.className += " menu-switch";
+        setSwitch(row, on);
+        return row;
+    }
+    // A stored on/off setting; changed() is whatever else must follow it.
+    function preferenceSwitch(parent, title, key, changed) {
+        var row = switchRow(parent, translate(title), preferences[key], function () {
+            preferences[key] = !preferences[key];
+            if (!savePreferences()) { preferences[key] = !preferences[key]; return; }
+            setSwitch(row, preferences[key]);
+            if (changed) { changed(); }
+        });
+        return row;
+    }
+    // The page every Settings list sits on: the top bar names it, the list is a card, and notes stay below the card.
+    function settingsPage(title) {
+        clear(screen);
+        page(title, "settings");
+        var card = element("section", "settings-menu");
+        card.setAttribute("aria-label", title);
+        screen.appendChild(card);
+        var notes = element("div", "settings-notes");
+        screen.appendChild(notes);
+        return { card: card, list: menuList(card), notes: notes };
+    }
+    // The panel of every player menu: a title and one list, on the right or (left) the left. Back runs dismiss.
+    function sidePanel(title, left, dismiss) {
+        cancelHudTimer();
+        var old = document.getElementById("player-menu");
+        if (old && old.parentNode) { old.parentNode.removeChild(old); }
+        var menu = element("section", "player-menu" + (left ? " player-menu-left" : ""));
+        menu.id = "player-menu";
+        menu.plexDismiss = dismiss;
+        menu.appendChild(element("h2", "", title));
+        menu.list = menuList(menu);
+        return menu;
+    }
+    // Built detached, so a long list costs one layout. Focus starts on the given row, else on the current choice.
+    function showPanel(menu, focus) {
+        screen.appendChild(menu);
+        (focus || menu.querySelector('[aria-pressed="true"]') || menu.querySelector("button")).focus();
+    }
+
     // Transparent, so the theme's placeholder surface and glyph behind the image show (style.css, artwork placeholders).
     function placeholderArt() {
         return "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='360'/%3E";
@@ -771,7 +867,7 @@
     var sideways = false;
     function hasClass(node, pattern) { return !!node && pattern.test(node.className || ""); }
     // Lists keep the focused row in the middle of the visible height; a shelf (title and row) counts as one row.
-    var CENTERED = /(?:^| )(?:item-list|catalogue-grid|shelf|settings-menu|search-results|dropdown-list|player-menu)(?: |$)/;
+    var CENTERED = /(?:^| )(?:item-list|catalogue-grid|shelf|search-results|dropdown-list)(?: |$)/;
     // How far content must move for box's middle to sit in the middle of [top, bottom].
     function centerShift(box, top, bottom) { return Math.round((box.top + box.bottom - top - bottom) / 2); }
     function usable(nodes) {
@@ -790,11 +886,29 @@
         return hasClass(row, ROWS) ? row : null;
     }
 
+    // A menu's list moves by its transform, the focused row in the middle, stopping at the list's ends. Only a step
+    // glides: after a wrap or on opening, the row would start out of view and the browser would scroll to it itself.
+    function moveMenuList(list, node) {
+        var view = list.parentNode;
+        view.scrollTop = 0;
+        var room = list.offsetHeight - view.clientHeight;
+        var y = Math.max(0, Math.min(room, Math.round(node.offsetTop + (node.offsetHeight - view.clientHeight) / 2)));
+        var edges = "menu-view" + (y > 0 ? " more-above" : "") + (y < room ? " more-below" : "");
+        if (view.className !== edges) { view.className = edges; }
+        var moved = Math.abs(y - (list.vemmY || 0));
+        if (!moved) { return; }
+        list.vemmY = y;
+        list.style.webkitTransition = list.style.transition = moved > node.offsetHeight * 1.5 ? "none" : "";
+        list.style.webkitTransform = list.style.transform = "translate3d(0," + (-y) + "px,0)";
+    }
+
     // The one reveal for every focus change. Rows scroll sideways only as far as needed. Vertically, inside a list
     // the focused row is centred below the fixed header (the browser stops the first and last rows at the ends);
-    // anything else scrolls only as far as needed. Fixed bars never scroll, and menus scroll inside themselves.
+    // anything else scrolls only as far as needed. Fixed bars never scroll, and menus move inside themselves.
     function revealControl(node) {
         if (!node.getBoundingClientRect) { return; }
+        // The Play row brings the whole of a details page's hero back.
+        if (hasClass(node.parentNode, /(?:^| )detail-actions(?: |$)/)) { screen.scrollTop = 0; return; }
         var home = screen.className.indexOf("screen-home") !== -1;
         if (home && hasClass(node.parentNode, /home-feature-actions/)) {
             screen.className = "screen screen-home";
@@ -806,14 +920,21 @@
         var list = null;
         for (var parent = node.parentNode; parent && parent !== screen; parent = parent.parentNode) {
             if (hasClass(parent, /(?:^| )(?:browse-header|letter-bar)(?: |$)/)) { return; }
-            if (hasClass(parent, /(?:^| )(?:shelf-row|home-navigation)(?: |$)/)) {
+            if (hasClass(parent, /(?:^| )(?:shelf-row|home-navigation|detail-cast-row)(?: |$)/)) {
                 var edges = parent.getBoundingClientRect();
-                if (box.left < edges.left + 8) { parent.scrollLeft -= edges.left + 8 - box.left; }
-                else if (box.right > edges.right - 8) { parent.scrollLeft += box.right - edges.right + 8; }
+                // A details page's rows keep their next item in sight: the browser centres a focus that was fully hidden.
+                var margin = hasClass(parent, /(?:^| )(?:episode-row|season-tabs|detail-cast-row|person-row)(?: |$)/) ? box.width / 4 : 8;
+                // The browser's own reveal stops an end item at the row's edge, inside its padding, so the ends are exact.
+                if (!node.previousElementSibling) { parent.scrollLeft = 0; }
+                else if (!node.nextElementSibling) { parent.scrollLeft = parent.scrollWidth; }
+                else if (box.left < edges.left + margin) { parent.scrollLeft -= edges.left + margin - box.left; }
+                else if (box.right > edges.right - margin) { parent.scrollLeft += box.right - edges.right + margin; }
             }
             if (!shelf && hasClass(parent, /(?:^| )shelf(?: |$)/)) { shelf = parent; }
             if (!list && CENTERED.test(parent.className || "")) { list = parent; }
-            if (hasClass(parent, /(?:^| )(?:player-menu|dropdown-list)(?: |$)/)) {
+            if (hasClass(parent, /(?:^| )menu-list(?: |$)/)) { moveMenuList(parent, node); return; }
+            if (hasClass(parent, /(?:^| )player-menu(?: |$)/)) { return; }
+            if (hasClass(parent, /(?:^| )dropdown-list(?: |$)/)) {
                 var menu = parent.getBoundingClientRect();
                 parent.scrollTop += centerShift(box, menu.top, menu.bottom);
                 return;
@@ -1670,10 +1791,11 @@
         });
     }
 
-    function playFromCard(item, client, resume) {
+    // loaded: the target when the page already has it (its suggested item).
+    function playFromCard(item, client, resume, loaded) {
         setStatus("Loading details...");
         var generation = viewGeneration;
-        cardTarget(item, client, resume).then(function (target) {
+        (loaded || cardTarget(item, client, resume)).then(function (target) {
             if (!target || generation !== viewGeneration || player) { return; }
             startPlayer(target.item, client, target.offset);
         }).catch(function (error) {
@@ -1687,38 +1809,36 @@
         var info = node && node.vemmCard;
         if (!info || !window.VemmItemMenu || homePending) { return false; }
         var rows = window.VemmItemMenu.rows(info.item, {
-            deck: !!info.options.deck, continueAction: preferences.continueAction
+            deck: !!info.options.deck, continueAction: preferences.continueAction, listed: info.options.listed
         });
         if (!rows.length) { return false; }
-        var old = document.getElementById("player-menu");
-        if (old) { old.parentNode.removeChild(old); }
-        var menu = element("section", "player-menu");
-        menu.id = "player-menu";
-        menu.appendChild(element("h2", "", info.item.title || translate("Selected item")));
+        var menu = sidePanel(info.item.title || translate("Selected item"));
         var item = info.item;
         var client = info.client;
         function close() {
             if (menu.parentNode) { menu.parentNode.removeChild(menu); }
         }
         rows.forEach(function (row) {
-            button(menu, row.label, function () {
+            button(menu.list, row.label, function () {
                 close();
+                // Back from what this opens returns to the card (visit remembers the focus).
+                node.focus();
                 if (row.id === "play" || row.id === "start") {
                     playFromCard(item, client, row.id === "play");
                 } else if (row.id === "details") {
-                    visit(function () { openDetail(item.ratingKey, client); });
+                    visit(function () { openDetail(item.ratingKey, client, false, undefined, item); });
                 } else if (row.id === "show") {
                     visit(function () { openDetail(item.grandparentRatingKey, client); });
                 } else if (row.id === "season") {
                     visit(function () { openDetail(item.parentRatingKey, client); });
                 } else {
-                    confirmWatchAction(item, client, row.id);
+                    confirmWatchAction(item, client, row.id, info.options.reopen);
                 }
             });
         });
-        button(menu, "Cancel", function () { close(); node.focus(); });
-        screen.appendChild(menu);
-        menu.querySelector("button").focus();
+        menu.plexDismiss = function () { close(); node.focus(); };
+        button(menu.list, "Cancel", menu.plexDismiss);
+        showPanel(menu);
         return true;
     }
 
@@ -1739,11 +1859,10 @@
     // is written to Plex; the choice is stored on this TV only.
     function openFavorites(firstRun) {
         var generation = ++viewGeneration;
-        clear(screen);
+        var body = settingsPage(translate("Favorite libraries"));
         resetImages();
         restoreView = function () { openFavorites(firstRun); };
         retryView = restoreView;
-        page(translate("Favorite libraries"), "favorites");
         setStatus("Loading libraries...");
         currentClient.getSections().then(function (sections) {
             if (generation !== viewGeneration) { return; }
@@ -1751,15 +1870,15 @@
                 return ["movie", "show", "artist", "photo"].indexOf(section.type) !== -1;
             });
             if (!sections.length) {
-                screen.appendChild(element("p", "empty-state", translate("No available libraries.")));
-                button(screen, "Back", backView); setStatus("No available libraries."); focusFirst(); return;
+                body.notes.appendChild(element("p", "empty-state", translate("No available libraries.")));
+                button(body.list, "Back", backView); setStatus("No available libraries."); focusFirst(); return;
             }
             var saved = favoriteKeys();
             var all = sections.map(function (section) { return String(section.key); });
             var chosen = (saved || all).filter(function (key) { return all.indexOf(key) !== -1; });
             if (!chosen.length) { chosen = all.slice(); }
             var initial = chosen.slice().sort().join(",");
-            screen.appendChild(element("p", "help-text", translate(firstRun ?
+            body.notes.appendChild(element("p", "help-text", translate(firstRun ?
                 "Choose the libraries Home shows. You can change this later in Settings." :
                 "Choose the libraries Home shows on this server.")));
             var done;
@@ -1767,10 +1886,9 @@
                 if (!done) { return; }
                 done.disabled = !firstRun && chosen.slice().sort().join(",") === initial;
             }
-            var choices = group(screen, "", "selection-list");
             sections.forEach(function (section) {
                 var key = String(section.key);
-                var toggle = button(choices, "", function () {
+                var toggle = button(body.list, section.title || key, function () {
                     var index = chosen.indexOf(key);
                     if (index !== -1) {
                         if (chosen.length === 1) { setStatus("Keep at least one library.", true); return; }
@@ -1778,14 +1896,12 @@
                     } else { chosen.push(key); }
                     paint();
                     refreshDone();
-                });
-                function paint() {
-                    toggle.textContent = (chosen.indexOf(key) !== -1 ? "[x] " : "[ ] ") + (section.title || key);
-                    toggle.setAttribute("aria-pressed", chosen.indexOf(key) !== -1 ? "true" : "false");
-                }
+                }, true, "none");
+                toggle.className += " menu-switch";
+                function paint() { toggle.setAttribute("aria-pressed", String(chosen.indexOf(key) !== -1)); }
                 paint();
             });
-            done = button(screen, firstRun ? "Start watching" : "Done", function () {
+            done = button(body.list, firstRun ? "Start watching" : "Done", function () {
                 try {
                     window.VemmFavorites.save(window.localStorage, currentServerId, chosen);
                 } catch (error) { setStatus(error.message === "Keep at least one library." ? errorText(error) :
@@ -1795,10 +1911,9 @@
                 loadHome(false);
             });
             refreshDone();
-            button(screen, firstRun ? "Skip for now" : "Back", function () {
-                if (firstRun) { navigation.length = 0; restoreView = null; loadHome(false); }
-                else { backView(); }
-            });
+            if (firstRun) {
+                button(body.list, "Skip for now", function () { navigation.length = 0; restoreView = null; loadHome(false); });
+            }
             setStatus(firstRun ? "Nothing is saved until you choose Start watching." : "Toggle libraries, then choose Done.");
             focusFirst();
         }).catch(function (error) {
@@ -1806,7 +1921,7 @@
             if (recoverSession(error)) { return; }
             if (firstRun) { loadHome(false); return; }
             setStatus(errorText(error), true);
-            button(screen, "Back", backView);
+            button(body.list, "Back", backView);
             focusFirst();
         });
     }
@@ -1910,11 +2025,11 @@
             var primary = button(actions, "", function () {
                 if (["movie", "episode", "clip"].indexOf(featured.type) !== -1) {
                     playFromCard(featured, currentClient, true);
-                } else { visit(function () { openDetail(featured.ratingKey, currentClient); }); }
+                } else { visit(function () { openDetail(featured.ratingKey, currentClient, false, undefined, featured); }); }
             }, true, "play");
             primary.className += " home-feature-primary";
             var info = button(actions, "Open details", function () {
-                visit(function () { openDetail(featured.ratingKey, currentClient); });
+                visit(function () { openDetail(featured.ratingKey, currentClient, false, undefined, featured); });
             }, false, "info");
             info.className += " round-control";
             info.setAttribute("aria-label", translate("Open details"));
@@ -2059,6 +2174,40 @@
         focusHome();
     }
 
+    // The Playlists tab shows only when this profile has playlists on this server. The last answer draws at once; a header
+    // asks again at most once a minute, and the tab comes or goes if the answer changed.
+    var PLAYLIST_CHECK_MS = 60000;
+    var playlistCheck = { key: "", at: 0 };
+    function playlistsKey() { return homeKey(currentServerId) + "-playlists"; }
+    function hasRememberedPlaylists() {
+        try { return window.localStorage.getItem(playlistsKey()) === "1"; } catch (error) { return false; }
+    }
+    function playlistsTab(nav) {
+        var tab = button(nav, "Playlists", function () { visit(openPlaylists); });
+        tab.className += " playlists-tab";
+        var liveTv = nav.querySelector(".menu-icon-television");
+        if (liveTv) { nav.insertBefore(tab, liveTv); }
+    }
+    function checkPlaylists() {
+        if (!currentClient || !currentClient.getPlaylists) { return; }
+        var key = playlistsKey();
+        var now = Date.now();
+        if (playlistCheck.key === key && now - playlistCheck.at < PLAYLIST_CHECK_MS) { return; }
+        playlistCheck = { key: key, at: now };
+        currentClient.getPlaylists(0).then(function (container) {
+            if (playlistCheck.key !== key) { return; }
+            var any = !!(container && container.Metadata && container.Metadata.length);
+            try { window.localStorage.setItem(key, any ? "1" : "0"); } catch (error) { /* only a convenience */ }
+            var nav = screen.querySelector(".home-navigation");
+            var tab = nav && nav.querySelector(".playlists-tab");
+            if (any && nav && !tab) { playlistsTab(nav); }
+            if (!any && tab) {
+                if (document.activeElement === tab) { tab.previousSibling.focus(); }
+                nav.removeChild(tab);
+            }
+        }).catch(function () { /* the tab stays as it was */ });
+    }
+
     function browseHeader(selected) {
         setDetailMode(true);
         var header = element("header", "browse-header");
@@ -2087,10 +2236,14 @@
             choice.className += " library-button";
             if (selected && String(selected.key) === String(section.key)) { choice.setAttribute("aria-current", "page"); }
         });
-        button(nav, "Playlists", function () { visit(openPlaylists); });
-        button(nav, "Search", function () { visit(openSearch); });
+        if (hasRememberedPlaylists()) { playlistsTab(nav); }
+        if (iptvLink()) { button(nav, "Live TV", function () { visit(openLiveTv); }, false, "television"); }
         header.appendChild(nav);
+        var search = button(header, "Search", function () { visit(openSearch); });
+        search.className += " search-control round-control";
+        search.setAttribute("aria-label", translate("Search"));
         screen.appendChild(header);
+        checkPlaylists();
         var utilities = element("div", "home-utilities");
         button(utilities, "Settings", function () { visit(openSettings); }, false, "settings");
         button(utilities, "Refresh", function () {
@@ -2285,18 +2438,29 @@
     }
 
     // Artwork is fetched ahead for rows within three screens of the viewport, nearest first, and released from rows
-    // more than ten screens away.
+    // more than ten screens away. A show's episode row is measured the same way, sideways. A cast page's rows look one
+    // screen ahead, and a row of titles further than half a screen below the page waits until it comes nearer.
     function syncLibraryArt() {
         artTimer = null;
         var list = document.getElementById("item-list");
-        if (!list) { return; }
-        var height = window.innerHeight || 720;
+        if (list) { syncRowArt(list, false, 3); return; }
+        var episodes = screen.querySelector(".episode-row");
+        if (episodes) { syncRowArt(episodes, true, 3); return; }
+        Array.prototype.forEach.call(screen.querySelectorAll(".person-row"), function (row) {
+            if (row.getBoundingClientRect().top < 1.5 * (window.innerHeight || 720)) { syncRowArt(row, true, 1); }
+        });
+    }
+
+    function syncRowArt(row, sideways, screens) {
+        var length = (sideways ? window.innerWidth : window.innerHeight) || 720;
         var near = [];
-        Array.prototype.forEach.call(list.children, function (node) {
+        Array.prototype.forEach.call(row.children, function (node) {
             if (!node.vemmArt) { return; }
             var box = node.getBoundingClientRect();
-            var distance = box.bottom < 0 ? -box.bottom : box.top > height ? box.top - height : 0;
-            if (distance <= 3 * height) { near.push({ node: node, distance: distance }); } else if (distance > 10 * height) { hideArt(node); }
+            var start = sideways ? box.left : box.top;
+            var end = sideways ? box.right : box.bottom;
+            var distance = end < 0 ? -end : start > length ? start - length : 0;
+            if (distance <= screens * length) { near.push({ node: node, distance: distance }); } else if (distance > 10 * length) { hideArt(node); }
         });
         near.sort(function (a, b) { return a.distance - b.distance; });
         near.forEach(function (entry) { showArt(entry.node); });
@@ -2535,12 +2699,6 @@
         viewClients.push(client);
         resetImages();
         retryView = function () { openListing(title, loader, client, offset, retained, null, navigation); };
-        function addShowAction() {
-            if (!navigation || !navigation.showRatingKey) { return; }
-            button(screen, "Go to show", function () {
-                visit(function () { openDetail(navigation.showRatingKey, client); });
-            });
-        }
         page(title, "listing");
         setStatus("Loading...");
         offset = offset || 0;
@@ -2562,7 +2720,6 @@
                     openListing(title, loader, client, next, items, null, navigation);
                 });
             }
-            addShowAction();
             button(screen, "Back", backView);
             setStatus(translate("{count} items shown.", { count: items.length }));
             focusFirst();
@@ -2571,7 +2728,6 @@
             button(screen, "Retry", function () {
                 openListing(title, loader, client, offset, retained, null, navigation);
             });
-            addShowAction();
             button(screen, "Back", backView);
             setStatus(errorText(error), true);
             focusFirst();
@@ -3038,16 +3194,7 @@
                 var people = element("section", "people-results");
                 people.appendChild(element("h3", "", translate("Cast and crew")));
                 var row = element("div", "detail-cast-row");
-                take(arranged.people.slice(0, 5)).forEach(function (entry) {
-                    var node = button(row, entry.person.tag || "Person", function () {
-                        visit(function () { openPerson(entry.person, entry.client); });
-                    }, true);
-                    node.className = "detail-person";
-                    var face = element("img", "detail-person-photo");
-                    face.alt = "";
-                    node.appendChild(face);
-                    queueImage(face, entry.client, entry.person.thumb, { width: 200, height: 200 });
-                });
+                take(arranged.people.slice(0, 5)).forEach(function (entry) { personCard(row, entry.person, entry.client); });
                 people.appendChild(row);
                 results.appendChild(people);
             }
@@ -3141,26 +3288,101 @@
         if (typeof savedQuery === "string" && savedQuery) { keyboard.set(savedQuery); renderRecents(); search(); }
     }
 
-    function openDetail(id, client, playlist) {
-        retryView = function () { openDetail(id, client, playlist); };
-        restoreView = retryView;
-        var generation = ++viewGeneration;
-        clear(screen);
-        viewClients.push(client);
-        resetImages();
-        button(screen, "Back", backView);
-        setStatus("Loading details...");
-        focusLoading();
+    // Recent metadata answers, like the remembered Home: a page draws from one at once and the server's answer only
+    // changes it if it differs. Playing or marking something forgets them all (forgetDetails).
+    var DETAIL_MEMORY = 12;
+    function recallDetail(client, id) {
+        return detailMemory.filter(function (entry) { return entry.client === client && entry.id === String(id); })[0] || null;
+    }
+    function rememberDetail(client, id, item) {
+        var before = recallDetail(client, id);
+        var data = JSON.stringify(item);
+        detailMemory = [{ client: client, id: String(id), item: item, data: data }].concat(detailMemory.filter(function (entry) {
+            return entry !== before;
+        })).slice(0, DETAIL_MEMORY);
+        return !before || before.data !== data;
+    }
+    function forgetDetails() {
+        detailMemory = [];
+        if (castPages) { castPages.forget(); }
+    }
+
+    // A card the cursor rests on fetches its page's answer, so pressing it can draw the whole page at once.
+    function fetchAhead(item, client) {
+        clearTimeout(aheadTimer);
+        // The remembered Home can show before its server's client exists.
+        if (!client || recallDetail(client, item.ratingKey)) { return; }
+        aheadTimer = setTimeout(function () {
+            if (player || document.hidden) { return; }
+            client.getMetadata(item.ratingKey).then(function (full) {
+                if (full) { rememberDetail(client, item.ratingKey, full); }
+            }).catch(function () { /* opening the page asks again */ });
+        }, 350);
+    }
+
+    // A details page draws at once from what is known: a remembered answer whole, or the card's list item (renderDetail's
+    // partial) with the rest filled in when the server answers. With nothing known the page stays empty; a server slower
+    // than a second shows a way back.
+    function openDetail(id, client, playlist, seasonKey, listed) {
+        if (listed && listed.type === "season" && listed.parentRatingKey) { openDetail(listed.parentRatingKey, client, false, listed.ratingKey); return; }
+        function again() { openDetail(id, client, playlist, seasonKey, listed); }
+        retryView = again;
+        restoreView = again;
+        var remembered = recallDetail(client, id);
+        var slow = null;
+        if (remembered || listed) {
+            renderDetail(remembered ? remembered.item : listed, client, seasonKey, !remembered);
+        } else {
+            viewGeneration += 1;
+            clear(screen);
+            viewClients.push(client);
+            resetImages();
+            setDetailMode(true);
+            setStatus("Loading details...");
+            parkFocus();
+            slow = setTimeout(function () {
+                if (generation !== viewGeneration) { return; }
+                button(screen, "Back", backView);
+                focusLoading();
+            }, 1000);
+        }
+        retryView = again;
+        var generation = viewGeneration;
         (playlist ? client.getPlaylist(id) : client.getMetadata(id)).then(function (item) {
+            clearTimeout(slow);
             if (generation !== viewGeneration) { return; }
             if (!item) { throw new Error("This item is no longer on the server."); }
-            renderDetail(item, client);
+            // A season opens as its show's page with that season chosen.
+            if (item.type === "season" && item.parentRatingKey) { openDetail(item.parentRatingKey, client, false, item.ratingKey); return; }
+            var changed = rememberDetail(client, id, item);
+            if (remembered) {
+                if (!changed) { return; }
+                // Rare: it changed on the server since it was remembered. Redraw with the viewer's place kept.
+                var controls = Array.prototype.slice.call(screen.querySelectorAll("button, input, select"));
+                var focus = controls.indexOf(document.activeElement);
+                pendingRestore = focus < 0 ? null : { focus: focus, scroll: screen.scrollTop };
+                renderDetail(item, client, seasonKey);
+            } else { renderDetail(item, client, seasonKey, false, !!listed); }
         }).catch(function (error) {
+            clearTimeout(slow);
             if (generation !== viewGeneration) { return; }
-            button(screen, "Retry details", function () { openDetail(id, client, playlist); });
+            if (remembered || listed) {
+                setStatus(errorText(error), true);
+                // A parked cursor was waiting for this answer.
+                var retry = screen.querySelector(".route-retry");
+                if (retry && document.activeElement === screen) { retry.focus(); }
+                return;
+            }
+            button(screen, "Retry details", again);
             setStatus(errorText(error), true);
             focusFirst();
         });
+    }
+
+    // No highlight anywhere until the page knows where the cursor goes. Back and the arrow keys still work from here.
+    function parkFocus() {
+        screen.setAttribute("tabindex", "-1");
+        screen.focus();
     }
 
     function durationLabel(ms) {
@@ -3192,38 +3414,377 @@
         return node;
     }
 
-    function renderDetail(item, client) {
-        viewGeneration += 1;
-        clear(screen);
-        viewClients.push(client);
-        resetImages();
-        restoreView = function () { openDetail(item.ratingKey, client, item.type === "playlist"); };
+    // Every page of a paged Plex list.
+    function allPages(load, start, list) {
+        return load(start).then(function (container) {
+            var found = container.Metadata || [];
+            var next = start + found.length;
+            return found.length && Number(container.totalSize) > next && next < LISTING_MAX ? allPages(load, next, list.concat(found)) : list.concat(found);
+        });
+    }
+
+    // The whole synopsis, from the Read more button on the Play row. Back or its own button closes it and returns there.
+    function openOverview(item, from) {
+        var panel = element("section", "player-menu overview-panel");
+        panel.id = "player-menu";
+        panel.setAttribute("role", "dialog");
+        panel.setAttribute("aria-modal", "true");
+        panel.appendChild(element("h2", "", item.title));
+        var text = element("p", "overview-text", item.summary);
+        panel.appendChild(text);
+        panel.plexDismiss = function () {
+            panel.parentNode.removeChild(panel);
+            from.focus();
+        };
+        var close = button(panel, "Back", panel.plexDismiss);
+        // Up and Down read a text taller than the panel.
+        panel.addEventListener("keydown", function (event) {
+            if (event.keyCode !== 38 && event.keyCode !== 40) { return; }
+            event.preventDefault();
+            event.stopPropagation();
+            text.scrollTop += (event.keyCode === 40 ? 1 : -1) * Math.round(text.clientHeight * 0.6);
+        });
+        screen.appendChild(panel);
+        close.focus();
+    }
+
+    // A show's season tabs and episode row, on its page and on its episodes' pages. The row holds every episode of the
+    // chosen season, a page at a time, with artwork only near the screen (syncLibraryArt), and rests on the suggested
+    // episode. options: show; season, the one to open (else VemmEpisodes.nextSeason); suggested, its ratingKey (else
+    // VemmEpisodes.nextEpisode's choice, told to picked); play, the button that plays it; load, what its background
+    // start plays; land, whether a parked cursor (parkFocus) moves to where the row rests once that is drawn. Returns
+    // the shown season. Other episodes play on OK; episodeLanding walks the tabs and the row.
+    function addEpisodes(section, client, options) {
+        var generation = viewGeneration;
+        var row = element("div", "shelf-row episode-row");
+        section.appendChild(row);
+        var tabs = null;
+        var suggested = options.suggested ? String(options.suggested) : "";
+        var shown = options.season ? String(options.season) : "";
+        var seasonTimer = null;
+        var unsettled = 2;
+        function current() { return generation === viewGeneration; }
+        // A Back restore counts controls, so it waits for both the tabs and the row.
+        function settled() {
+            unsettled -= 1;
+            if (!unsettled && pendingRestore) { focusFirst(); }
+        }
+        function isSuggested(item) { return String(item.ratingKey) === suggested; }
+        row.addEventListener("focus", function (event) {
+            var info = event.target.vemmCard;
+            if (!info) { return; }
+            row.vemmEntry = event.target;
+            scheduleLibraryArt();
+            if (isSuggested(info.item)) { holdStart(client, options.load); }
+        }, true);
+        function reopen() { openDetail(options.page, client, false, shown); }
+        function rest(node) {
+            // A long season's later pages must not pull the row from under a cursor already in it.
+            if (row.contains(document.activeElement)) { return; }
+            row.vemmEntry = node;
+            row.scrollLeft = node.offsetLeft - row.firstChild.offsetLeft - node.offsetWidth / 4;
+            var active = document.activeElement;
+            if (options.land && !pendingRestore && active === screen || row.vemmWanted && tabs && tabs.contains(active)) { node.focus(); }
+            options.land = false;
+            row.vemmWanted = false;
+        }
+        // No row to rest on: the cursor waiting for one goes to Play.
+        function noRow() { if (!pendingRestore && document.activeElement === screen) { options.play.focus(); } }
+        function failed(error) {
+            if (!current()) { return; }
+            if (options.picked) { options.picked(); }
+            setStatus(errorText(error), true);
+            unsettled = 1;
+            settled();
+            noRow();
+        }
+        // A season without the suggested episode rests on its own next one; a show with no On Deck suggests that.
+        function seasonDrawn(episodes) {
+            var choice = window.VemmEpisodes.nextEpisode(episodes);
+            if (options.picked) {
+                suggested = choice ? String(choice.ratingKey) : "";
+                options.picked(choice);
+                options.picked = null;
+            }
+            if (choice && !row.vemmEntry) { rest(row.children[episodes.indexOf(choice)]); }
+            settled();
+            if (!choice) { noRow(); }
+        }
+        function showSeason(key) {
+            shown = key;
+            var episodes = [];
+            (function nextPage(start) {
+                client.getChildren(key, start).then(function (container) {
+                    if (!current() || shown !== key) { return; }
+                    var found = (container.Metadata || []).filter(function (episode) { return episode.ratingKey; });
+                    if (!start) {
+                        while (row.firstChild) { row.removeChild(row.firstChild); }
+                        row.scrollLeft = 0;
+                    }
+                    var cards = document.createDocumentFragment();
+                    var resting = null;
+                    found.forEach(function (episode) {
+                        var node = card(cards, episode, client, null, { lazy: true, listed: true, reopen: reopen, open: function () {
+                            if (isSuggested(episode)) { options.play.click(); } else { playFromCard(episode, client, true); }
+                        } });
+                        if (isSuggested(episode)) { resting = node; }
+                    });
+                    episodes = episodes.concat(found);
+                    row.appendChild(cards);
+                    if (resting) { rest(resting); }
+                    var next = start + found.length;
+                    if (found.length && Number(container.totalSize) > next && next < LISTING_MAX) { nextPage(next); }
+                    else { seasonDrawn(episodes); }
+                    syncLibraryArt();
+                }).catch(failed);
+            }(0));
+        }
+        function enterRow() {
+            if (row.vemmEntry) { row.vemmEntry.focus(); } else { row.vemmWanted = true; }
+        }
+        function drawTabs(seasons) {
+            tabs = element("div", "shelf-row season-tabs");
+            seasons.forEach(function (season) {
+                var key = String(season.ratingKey);
+                var tab = detailAction(tabs, season.title || String(season.index), "", enterRow, true);
+                tab.className += " season-tab";
+                tab.setAttribute("aria-selected", String(key === shown));
+                if (key === shown) { tabs.vemmSelected = tab; }
+                // Its episodes follow the focus, once it rests; the old ones stay until they arrive.
+                tab.addEventListener("focus", function () {
+                    if (tabs.vemmSelected === tab) { return; }
+                    tabs.vemmSelected.setAttribute("aria-selected", "false");
+                    tab.setAttribute("aria-selected", "true");
+                    tabs.vemmSelected = tab;
+                    shown = key;
+                    row.vemmEntry = null;
+                    clearTimeout(seasonTimer);
+                    seasonTimer = setTimeout(function () { if (current() && shown === key) { showSeason(key); } }, 250);
+                });
+            });
+            section.insertBefore(tabs, row);
+        }
+        if (shown) { showSeason(shown); }
+        allPages(function (start) { return client.getChildren(options.show, start); }, 0, []).then(function (list) {
+            if (!current()) { return; }
+            var seasons = window.VemmEpisodes.seasonOrder(list.filter(function (entry) { return entry.type === "season" && entry.ratingKey; }));
+            var known = seasons.some(function (season) { return String(season.ratingKey) === shown; });
+            // A show without seasons lists its episodes directly.
+            if (!known) { showSeason(String(seasons.length ? window.VemmEpisodes.nextSeason(seasons).ratingKey : options.show)); }
+            if (seasons.length > 1) { drawTabs(seasons); }
+            else { section.insertBefore(element("h3", "detail-section-title", translate("Episodes")), row); }
+            settled();
+        }).catch(failed);
+        return function () { return shown; };
+    }
+
+    // A file's versions, parts and tracks, read-only, from More. Back or its button closes it and returns to More.
+    function openFileInfo(item, from) {
+        var fileInfoRows = window.VemmFileInfo.rows(item);
+        var fileInfo = element("section", "file-info-panel");
+        fileInfo.setAttribute("role", "dialog");
+        fileInfo.setAttribute("aria-modal", "true");
+        fileInfo.setAttribute("aria-label", translate("File information"));
+        fileInfo.appendChild(element("h2", "", translate("File information")));
+        // One collapsed section per version/part and kind of track; Enter opens it, Up and Down walk the headings.
+        var sections = [];
+        fileInfoRows.forEach(function (row) {
+            var key = row.version + "/" + row.part + "/" + row.trackType;
+            var section = sections.filter(function (entry) { return entry.key === key; })[0];
+            if (!section) {
+                var title = translate(row.trackType === "Subtitle" ? "Subtitles" : row.trackType || "General");
+                if (fileInfoRows[fileInfoRows.length - 1].version > 1) { title = translate("Version {number}", { number: row.version }) + " / " + title; }
+                if (row.part) { title += " / " + translate("Part {number}", { number: row.part }); }
+                section = { key: key, title: title, rows: [] };
+                sections.push(section);
+            }
+            section.rows.push(row);
+        });
+        // The panel scrolls; keep the focused heading or button inside it.
+        var revealInPanel = function (node) {
+            var box = fileInfo.getBoundingClientRect();
+            var at = node.getBoundingClientRect();
+            if (at.top < box.top + 8) { fileInfo.scrollTop -= box.top + 8 - at.top; }
+            else if (at.bottom > box.bottom - 8) { fileInfo.scrollTop += at.bottom - box.bottom + 8; }
+        };
+        sections.forEach(function (section) {
+            var body = element("div", "file-info-body");
+            body.hidden = true;
+            var lastTrack = null;
+            section.rows.forEach(function (row) {
+                if (row.track > 1 && row.track !== lastTrack) {
+                    body.appendChild(element("p", "file-info-track", translate(row.trackType) + " " + row.track));
+                }
+                lastTrack = row.track;
+                var fact = element("p", "file-info-row");
+                fact.appendChild(element("span", "file-info-label", translate(row.label) + ": "));
+                fact.appendChild(element("span", "file-info-value", row.value));
+                body.appendChild(fact);
+            });
+            var heading = button(fileInfo, section.title, function () {
+                body.hidden = !body.hidden;
+                heading.setAttribute("aria-expanded", String(!body.hidden));
+                revealInPanel(heading);
+            }, true);
+            heading.className += " file-info-heading";
+            heading.setAttribute("aria-expanded", "false");
+            fileInfo.appendChild(body);
+        });
+        button(fileInfo, "Close menu", function () {
+            fileInfo.parentNode.removeChild(fileInfo);
+            from.focus();
+        });
+        var panelButtons = Array.prototype.slice.call(fileInfo.querySelectorAll("button"));
+        panelButtons.forEach(function (node) {
+            node.addEventListener("focus", function () { revealInPanel(node); });
+        });
+        // Up/Down page through an expanded section taller than the panel before moving to the next heading.
+        fileInfo.addEventListener("keydown", function (event) {
+            var down = event.keyCode === 40;
+            var at = panelButtons.indexOf(document.activeElement);
+            if ((!down && event.keyCode !== 38) || at < 0) { return; }
+            var heading = panelButtons[down ? at : at - 1];
+            var target = panelButtons[at + (down ? 1 : -1)];
+            if (!target || !heading || heading.getAttribute("aria-expanded") !== "true") { return; }
+            var box = fileInfo.getBoundingClientRect();
+            var rect = target.getBoundingClientRect();
+            if (down ? rect.bottom <= box.bottom - 8 : rect.top >= box.top + 8) { return; }
+            event.preventDefault();
+            event.stopPropagation();
+            fileInfo.scrollTop += (down ? 1 : -1) * Math.round(fileInfo.clientHeight * 0.6);
+        });
+        screen.appendChild(fileInfo);
+        fileInfo.querySelector(".file-info-heading").focus();
+    }
+
+    // More on the Play row: the new menu's rows in a list over the page, under its button, or above it when there is no
+    // room below. Nothing on the page moves. Back closes it and returns to the button.
+    function openMoreMenu(anchor, rows) {
+        var menu = element("section", "player-menu more-menu");
+        menu.id = "player-menu";
+        menu.plexDismiss = function () {
+            menu.parentNode.removeChild(menu);
+            anchor.setAttribute("aria-expanded", "false");
+            anchor.focus();
+        };
+        var list = menuList(menu);
+        rows.forEach(function (row) {
+            button(list, row.label, function () { menu.plexDismiss(); row.action(); }, true, "none");
+        });
+        // Left and Right have nowhere to go in a list.
+        menu.addEventListener("keydown", function (event) {
+            if (event.keyCode === 37 || event.keyCode === 39) { event.preventDefault(); event.stopPropagation(); }
+        });
+        screen.appendChild(menu);
+        var box = anchor.getBoundingClientRect();
+        var height = window.innerHeight || 720;
+        menu.style.left = Math.min(box.left, (window.innerWidth || 1280) - menu.offsetWidth - 24) + "px";
+        if (box.bottom + 12 + menu.offsetHeight + 24 > height) { menu.style.bottom = height - box.top + 12 + "px"; }
+        else { menu.style.top = box.bottom + 12 + "px"; }
+        anchor.setAttribute("aria-expanded", "true");
+        menu.querySelector("button").focus();
+    }
+
+    // A person's circle on the details page and the cast page: photo, name, what they did. OK opens their page unless
+    // the caller says otherwise.
+    function personCard(parent, person, client, role, lazy, open) {
+        var node = button(parent, person.tag || "Person", open || function () {
+            visit(function () { openPerson(person, client); });
+        }, true);
+        node.className = "detail-person";
+        var face = element("img", "detail-person-photo");
+        face.alt = "";
+        node.appendChild(face);
+        if (role) { node.appendChild(element("span", "detail-person-role", role)); }
+        node.vemmArt = { image: face, client: client, path: person.thumb, size: { width: 200, height: 200 } };
+        if (lazy) { node.vemmFar = true; } else { showArt(node); }
+        return node;
+    }
+    function creditsOf(item) { return (item.Role || []).concat(item.Director || [], item.Writer || []); }
+    function creditRole(item, person) {
+        return person.role || (item.Director || []).indexOf(person) !== -1 && translate("Director") ||
+            (item.Writer || []).indexOf(person) !== -1 && translate("Writer") || "";
+    }
+
+    // The cast page and a person's page (js/cast-ui.js).
+    function castUi() {
+        if (!castPages) {
+            castPages = window.VemmCastUi.create({
+                screen: screen, element: element, button: button, translate: translate, card: card, personCard: personCard,
+                begin: function (kind, client, restore, leave, step) {
+                    var generation = ++viewGeneration;
+                    clear(screen);
+                    viewClients.push(client);
+                    setDetailMode(true);
+                    screen.className = "screen screen-" + kind;
+                    restoreView = restore;
+                    retryView = restore;
+                    viewCleanup = leave;
+                    pageStep = step;
+                    return generation;
+                },
+                generation: function () { return viewGeneration; },
+                allPages: function (load) { return allPages(load, 0, []); },
+                account: function () { return accountClient; },
+                recall: recallDetail, queueImage: queueImage, placeholder: placeholderArt,
+                syncArt: syncLibraryArt, scheduleArt: scheduleLibraryArt,
+                visit: visit, back: backView, openSearch: openSearch, overview: openOverview,
+                status: setStatus, errorText: errorText, log: logError, focus: focusFirst, parkFocus: parkFocus,
+                restoring: function () { return !!pendingRestore; },
+                restored: function () { pendingRestore = null; }
+            });
+        }
+        return castPages;
+    }
+    function openCast(item, client, person) { castUi().cast(item, client, creditsOf(item), person); }
+    function openPerson(person, client) { castUi().person(person, client); }
+
+    // partial: only a list item is known, so the hero is drawn and nothing that needs the whole answer: no background
+    // start, sections or show's Play row. refill: that answer has come, and replaces the hero in one step on the same page.
+    var CAST_ON_PAGE = 16;
+    var drawnHero = null;
+    function renderDetail(item, client, seasonKey, partial, refill) {
+        if (!refill) {
+            viewGeneration += 1;
+            clear(screen);
+            viewClients.push(client);
+            resetImages();
+        }
+        var shownSeason = null;
+        restoreView = function () { openDetail(item.ratingKey, client, item.type === "playlist", shownSeason ? shownSeason() : seasonKey, item); };
+        if (item.type === "show") { playReturn = function () { openDetail(item.ratingKey, client, false, undefined, item); }; }
         setDetailMode(true);
         screen.className = "screen screen-detail";
         var playable = ["movie", "episode", "clip", "track"].indexOf(item.type) !== -1;
         var backdropPath = item.art || item.grandparentArt || item.parentArt ||
             (item.type === "episode" || item.type === "clip" ? item.thumb : "");
-        if (backdropPath) {
+        if (backdropPath && !(refill && drawnHero.vemmBackdrop)) {
             var backdrop = element("img", "detail-backdrop");
             backdrop.alt = "";
-            screen.appendChild(backdrop);
+            if (refill) { screen.insertBefore(backdrop, screen.firstChild); } else { screen.appendChild(backdrop); }
             queueImage(backdrop, client, backdropPath, { width: 1280, height: 720 }, 4 * 1024 * 1024, function () {
                 backdrop.className = "detail-backdrop detail-backdrop-ready";
                 presentBackdrop(backdrop);
             }, true);
         }
-        screen.appendChild(element("div", "detail-scrim"));
+        if (!refill) { screen.appendChild(element("div", "detail-scrim")); }
 
-        var hero = element("section", "detail-hero");
+        var browsing = item.type === "show" || item.type === "episode" && !!item.grandparentRatingKey;
+        var hero = element("section", browsing ? "detail-hero detail-hero-episodes" : "detail-hero");
         var main = element("div", "detail-main");
         hero.appendChild(main);
+        hero.vemmBackdrop = !!backdropPath || !!(refill && drawnHero.vemmBackdrop);
         if (["artist", "album", "track", "photoalbum", "collection", "playlist"].indexOf(item.type) !== -1) {
             hero.className += " detail-hero-with-cover";
-            var cover = element("img", "detail-cover");
-            cover.alt = "";
-            cover.src = placeholderArt();
+            var cover = refill && drawnHero.vemmCover;
+            if (!cover) {
+                cover = element("img", "detail-cover");
+                cover.alt = "";
+                cover.src = placeholderArt();
+                queueImage(cover, client, item.thumb || item.composite, { width: 480, height: 480 });
+            }
+            hero.vemmCover = cover;
             hero.appendChild(cover);
-            queueImage(cover, client, item.thumb || item.composite, { width: 480, height: 480 });
         }
         if (item.type === "episode" && item.grandparentTitle) {
             main.appendChild(element("p", "detail-eyebrow", item.grandparentTitle +
@@ -3241,17 +3802,6 @@
 
         var synopsis = element("p", "synopsis detail-synopsis", item.summary || translate("No synopsis is available."));
         main.appendChild(synopsis);
-        if (item.summary) {
-            var expand = button(main, "Read more", function () {
-                var expanded = synopsis.className.indexOf(" expanded") === -1;
-                synopsis.className = "synopsis detail-synopsis" + (expanded ? " expanded" : "");
-                expand.textContent = translate(expanded ? "Read less" : "Read more");
-                expand.setAttribute("aria-expanded", String(expanded));
-                revealControl(expand);
-            });
-            expand.className = "detail-expand";
-            expand.setAttribute("aria-expanded", "false");
-        }
 
         var year = item.year || (item.originallyAvailableAt ? String(item.originallyAvailableAt).slice(0, 4) : "");
         var remaining = item.viewOffset && item.duration ? Math.max(1, Math.round((item.duration - item.viewOffset) / 60000)) : 0;
@@ -3289,124 +3839,62 @@
 
         var actions = element("div", "detail-actions");
         main.appendChild(actions);
-        var more = element("div", "detail-more detail-overflow");
-        more.hidden = true;
-        var fileInfoRows = window.VemmFileInfo ? window.VemmFileInfo.rows(item) : [];
-        var fileInfo = null;
-        if (fileInfoRows.length) {
-            fileInfo = element("section", "file-info-panel");
-            fileInfo.hidden = true;
-            fileInfo.setAttribute("role", "dialog");
-            fileInfo.setAttribute("aria-modal", "true");
-            fileInfo.setAttribute("aria-label", translate("File information"));
-            fileInfo.appendChild(element("h2", "", translate("File information")));
-            // One collapsed section per version/part and kind of track; Enter opens it, Up and Down walk the headings.
-            var sections = [];
-            fileInfoRows.forEach(function (row) {
-                var key = row.version + "/" + row.part + "/" + row.trackType;
-                var section = sections.filter(function (entry) { return entry.key === key; })[0];
-                if (!section) {
-                    var title = translate(row.trackType === "Subtitle" ? "Subtitles" : row.trackType || "General");
-                    if (fileInfoRows[fileInfoRows.length - 1].version > 1) { title = translate("Version {number}", { number: row.version }) + " / " + title; }
-                    if (row.part) { title += " / " + translate("Part {number}", { number: row.part }); }
-                    section = { key: key, title: title, rows: [] };
-                    sections.push(section);
-                }
-                section.rows.push(row);
-            });
-            // The panel scrolls; keep the focused heading or button inside it.
-            var revealInPanel = function (node) {
-                var box = fileInfo.getBoundingClientRect();
-                var at = node.getBoundingClientRect();
-                if (at.top < box.top + 8) { fileInfo.scrollTop -= box.top + 8 - at.top; }
-                else if (at.bottom > box.bottom - 8) { fileInfo.scrollTop += at.bottom - box.bottom + 8; }
-            };
-            sections.forEach(function (section) {
-                var body = element("div", "file-info-body");
-                body.hidden = true;
-                var lastTrack = null;
-                section.rows.forEach(function (row) {
-                    if (row.track > 1 && row.track !== lastTrack) {
-                        body.appendChild(element("p", "file-info-track", translate(row.trackType) + " " + row.track));
-                    }
-                    lastTrack = row.track;
-                    var fact = element("p", "file-info-row");
-                    fact.appendChild(element("span", "file-info-label", translate(row.label) + ": "));
-                    fact.appendChild(element("span", "file-info-value", row.value));
-                    body.appendChild(fact);
-                });
-                var heading = button(fileInfo, section.title, function () {
-                    body.hidden = !body.hidden;
-                    heading.setAttribute("aria-expanded", String(!body.hidden));
-                    revealInPanel(heading);
-                }, true);
-                heading.className += " file-info-heading";
-                heading.setAttribute("aria-expanded", "false");
-                fileInfo.appendChild(body);
-            });
-            button(fileInfo, "Close menu", function () {
-                fileInfo.hidden = true;
-                moreButton.focus();
-            });
-            var panelButtons = Array.prototype.slice.call(fileInfo.querySelectorAll("button"));
-            panelButtons.forEach(function (node) {
-                node.addEventListener("focus", function () { revealInPanel(node); });
-            });
-            // Up/Down page through an expanded section taller than the panel before moving to the next heading.
-            fileInfo.addEventListener("keydown", function (event) {
-                var down = event.keyCode === 40;
-                var at = panelButtons.indexOf(document.activeElement);
-                if ((!down && event.keyCode !== 38) || at < 0) { return; }
-                var heading = panelButtons[down ? at : at - 1];
-                var target = panelButtons[at + (down ? 1 : -1)];
-                if (!target || !heading || heading.getAttribute("aria-expanded") !== "true") { return; }
-                var box = fileInfo.getBoundingClientRect();
-                var rect = target.getBoundingClientRect();
-                if (down ? rect.bottom <= box.bottom - 8 : rect.top >= box.top + 8) { return; }
-                event.preventDefault();
-                event.stopPropagation();
-                fileInfo.scrollTop += (down ? 1 : -1) * Math.round(fileInfo.clientHeight * 0.6);
-            });
-            detailAction(more, "File information", "info", function () {
-                fileInfo.hidden = false;
-                more.hidden = true;
-                moreButton.setAttribute("aria-expanded", "false");
-                fileInfo.querySelector(".file-info-heading").focus();
-            });
+        // More's rows: a list over the page when it opens (openMoreMenu).
+        var moreRows = [];
+        function addMore(label, action, literal) { moreRows.push({ label: literal ? label : translate(label), action: action }); }
+        if (window.VemmFileInfo && window.VemmFileInfo.rows(item).length) {
+            addMore("File information", function () { openFileInfo(item, moreButton); });
         }
+        // What this page suggests, and starts in the background (holdOnFocus): its own title, or a show's On Deck
+        // episode (in progress, else the next unwatched; the first of an unwatched show). A show without one has the
+        // episode list pick (a finished show, or one watched out of order).
+        var primary = null;
+        var loadSuggested = null;
         var onDeck = item.OnDeck && item.OnDeck.Metadata;
         if (Array.isArray(onDeck)) { onDeck = onDeck[0]; }
-        if (item.type === "show" && onDeck && onDeck.type === "episode" && onDeck.ratingKey) {
-            var nextEpisode = onDeck;
-            var nextPlay = detailAction(actions, nextEpisode.viewOffset ? "Resume" : "Play next episode", "play", function () {
-                playFromCard(nextEpisode, client, true);
+        if (item.type === "show") {
+            var nextEpisode = onDeck && onDeck.type === "episode" && onDeck.ratingKey ? onDeck : null;
+            var pickEpisode = null;
+            var suggestion = nextEpisode ? Promise.resolve(nextEpisode) : new Promise(function (resolve) { pickEpisode = resolve; });
+            var suggestedTarget = null;
+            loadSuggested = function () {
+                if (!suggestedTarget) {
+                    suggestedTarget = suggestion.then(function (episode) { return cardTarget(episode || item, client, true); });
+                    suggestedTarget.catch(function () { suggestedTarget = null; });
+                }
+                return suggestedTarget;
+            };
+            primary = detailAction(actions, !nextEpisode || !item.viewedLeafCount && !nextEpisode.viewOffset ? "Play" :
+                nextEpisode.viewOffset ? "Resume" : "Play next episode", "play", function () {
+                playFromCard(item, client, true, loadSuggested());
             });
-            nextPlay.className = "detail-pill detail-primary detail-pill-play";
-            preloadOnFocus(nextPlay, client, function () { return cardTarget(nextEpisode, client, true); });
-            if (nextEpisode.viewOffset) {
-                preloadOnFocus(detailAction(actions, "Play from beginning", "restart", function () { playFromCard(nextEpisode, client, false); }),
-                    client, function () { return cardTarget(nextEpisode, client, false); });
+            if (nextEpisode && nextEpisode.viewOffset) {
+                detailAction(actions, "Play from beginning", "restart", function () { playFromCard(nextEpisode, client, false); });
             }
+            // What this Play row says needs On Deck: until the answer it holds its place.
+            if (partial && actions.style) { actions.style.visibility = "hidden"; }
         }
         if (playable) {
-            var primary = detailAction(actions, item.viewOffset ? "Resume" : "Play", "play", function () {
-                startPlayer(item, client, item.viewOffset || 0);
+            // A list item has no tracks or chapters to start from, so pressing before the answer asks for them.
+            primary = detailAction(actions, item.viewOffset ? "Resume" : "Play", "play", function () {
+                if (partial) { playFromCard(item, client, true); } else { startPlayer(item, client, item.viewOffset || 0); }
             });
-            primary.className = "detail-pill detail-primary detail-pill-play";
-            var video = item.type !== "track";
-            if (video) { preloadOnFocus(primary, client, function () { return Promise.resolve({ item: item, offset: item.viewOffset || 0 }); }); }
+            if (item.type !== "track") { loadSuggested = function () { return Promise.resolve({ item: item, offset: item.viewOffset || 0 }); }; }
             if (item.viewOffset) {
-                var restart = detailAction(actions, "Play from beginning", "restart", function () { startPlayer(item, client, 0); });
-                if (video) { preloadOnFocus(restart, client, function () { return Promise.resolve({ item: item, offset: 0 }); }); }
+                detailAction(actions, "Play from beginning", "restart", function () {
+                    if (partial) { playFromCard(item, client, false); } else { startPlayer(item, client, 0); }
+                });
             }
             if ((item.Media || []).length > 1) {
                 item.Media.forEach(function (media, index) {
-                    detailAction(more, translate("Version {number}", { number: index + 1 }) + "  ·  " +
+                    addMore(translate("Version {number}", { number: index + 1 }) + "  ·  " +
                         [media.videoResolution ? String(media.videoResolution).toUpperCase() : "", media.videoCodec || ""].filter(Boolean).join(" "),
-                    "", function () { startPlayer(item, client, 0, index); }, true);
+                    function () { startPlayer(item, client, 0, index); }, true);
                 });
             }
         }
+        if (primary) { primary.className = "detail-pill detail-primary detail-pill-play"; }
+        if (loadSuggested && !partial) { holdOnFocus(primary, client, loadSuggested); }
         if (item.type === "album") {
             detailAction(actions, "Play album", "play", function () { startAlbum(item, client, false); }).className =
                 "detail-pill detail-primary detail-pill-play";
@@ -3426,8 +3914,8 @@
             detailAction(actions, "View photo", "play", function () { visit(function () { openPhotos([item], 0, client); }); }).className =
                 "detail-pill detail-primary detail-pill-play";
         }
-        if (["show", "season", "collection", "artist", "album", "photoalbum"].indexOf(item.type) !== -1) {
-            var childLabel = item.type === "show" ? "Seasons" : item.type === "season" ? "Episodes" :
+        if (["season", "collection", "artist", "album", "photoalbum"].indexOf(item.type) !== -1) {
+            var childLabel = item.type === "season" ? "Episodes" :
                 item.type === "artist" ? "Albums" : item.type === "album" ? "Tracks" :
                     item.type === "photoalbum" ? "Photos" : "Collection items";
             var children = detailAction(actions, childLabel, "list", function () {
@@ -3438,38 +3926,46 @@
                     }, client);
                 });
             });
-            if (item.type !== "album" && !(item.type === "show" && nextEpisode)) {
-                children.className = "detail-pill detail-primary detail-pill-list";
-            }
+            if (item.type !== "album") { children.className = "detail-pill detail-primary detail-pill-list"; }
+        }
+        if (item.summary) {
+            var readMore = detailAction(actions, "Read more", "", function () { openOverview(item, readMore); });
         }
         if (["movie", "episode", "show", "season"].indexOf(item.type) !== -1) {
             // LG parity: the toggle that applies is a direct hero action; its opposite stays in More.
             var leafCount = Number(item.leafCount) || 0;
             var fullyWatched = item.type === "show" || item.type === "season" ?
                 leafCount > 0 && Number(item.viewedLeafCount) >= leafCount : Number(item.viewCount) > 0 && !item.viewOffset;
-            detailAction(fullyWatched ? more : actions, "Mark watched", "watched", function () { confirmWatchAction(item, client, "watched"); });
-            detailAction(fullyWatched ? actions : more, "Mark unwatched", "unwatched", function () { confirmWatchAction(item, client, "unwatched"); });
+            var markWatched = function () { confirmWatchAction(item, client, "watched"); };
+            var markUnwatched = function () { confirmWatchAction(item, client, "unwatched"); };
+            if (fullyWatched) {
+                addMore("Mark watched", markWatched);
+                detailAction(actions, "Mark unwatched", "unwatched", markUnwatched);
+            } else {
+                detailAction(actions, "Mark watched", "watched", markWatched);
+                addMore("Mark unwatched", markUnwatched);
+            }
         }
         var trailer = window.VemmItemMenu && window.VemmItemMenu.trailerFor(item);
         if (trailer) {
-            detailAction(more, "Play trailer", "play", function () { playFromCard(trailer, client, false); });
+            addMore("Play trailer", function () { playFromCard(trailer, client, false); });
         }
         var plexGuid = /^plex:\/\/(?:movie|show)\/[0-9a-f]{24}$/i.test(item.guid || "") ? item.guid :
             (item.Guid || []).filter(function (guid) { return /^plex:\/\/(?:movie|show)\/[0-9a-f]{24}$/i.test(guid.id || ""); })[0];
         if (plexGuid && accountClient) {
             var guid = typeof plexGuid === "string" ? plexGuid : plexGuid.id;
-            detailAction(more, "Add to Watchlist", "add", function () {
+            addMore("Add to Watchlist", function () {
                 var linked = accountClient;
                 confirmServiceWrite("Add to Watchlist", function () { return linked.setWatchlist(guid, true); },
                     function () { openDetail(item.ratingKey, client); });
             });
         }
         if (["movie", "episode"].indexOf(item.type) !== -1) {
-            detailAction(more, "Remove from Continue Watching", "", function () { confirmWatchAction(item, client, "remove"); });
+            addMore("Remove from Continue Watching", function () { confirmWatchAction(item, client, "remove"); });
         }
         if (plexGuid && currentServerId && client === currentClient && servers.length > 1 && (item.type === "movie" || item.type === "show")) {
             var copyGuid = typeof plexGuid === "string" ? plexGuid : plexGuid.id;
-            detailAction(more, "Other servers", "", function () {
+            addMore("Other servers", function () {
                 visit(function () {
                     findCatalogueItem({ type: item.type, guid: copyGuid, title: item.title }, {
                         exclude: currentServerId, title: "Other servers", labelled: true
@@ -3477,7 +3973,7 @@
                 });
             });
         }
-        if (item.type !== "playlist") { detailAction(more, "Related titles", "", function () {
+        if (item.type !== "playlist") { addMore("Related titles", function () {
             visit(function () {
                 openListing("Related titles", function () {
                     return client.getRelated(item.ratingKey).then(function (container) {
@@ -3488,16 +3984,12 @@
                 }, client);
             });
         }); }
-        var moreButton = detailAction(actions, "More", "more", function () {
-            more.hidden = !more.hidden;
-            moreButton.setAttribute("aria-expanded", String(!more.hidden));
-            if (!more.hidden) { more.querySelector("button").focus(); }
-        });
-        moreButton.className += " round-control";
-        moreButton.setAttribute("aria-label", translate("More"));
-        moreButton.setAttribute("aria-expanded", "false");
-        if (item.type === "playlist") { actions.removeChild(moreButton); }
-        main.appendChild(more);
+        if (moreRows.length) {
+            var moreButton = detailAction(actions, "More", "more", function () { openMoreMenu(moreButton, moreRows); });
+            moreButton.className += " round-control";
+            moreButton.setAttribute("aria-label", translate("More"));
+            moreButton.setAttribute("aria-expanded", "false");
+        }
 
         var directors = (item.Director || []).slice(0, 2).map(function (person) { return person.tag; }).filter(Boolean);
         var stars = (item.Role || []).slice(0, 3).map(function (person) { return person.tag; }).filter(Boolean);
@@ -3512,31 +4004,43 @@
             });
             hero.appendChild(people);
         }
-        screen.appendChild(hero);
-        if (fileInfo) { screen.appendChild(fileInfo); }
+        var active = document.activeElement;
+        var onPills = refill && active && active.parentNode === drawnHero.vemmActions ? active.textContent : null;
+        if (refill) { screen.replaceChild(hero, drawnHero); } else { screen.appendChild(hero); }
+        hero.vemmActions = actions;
+        drawnHero = hero;
+        if (browsing && !partial) {
+            var browser = element("section", "detail-section episode-browser");
+            screen.appendChild(browser);
+            shownSeason = addEpisodes(browser, client, item.type === "show" ? {
+                page: item.ratingKey, show: item.ratingKey, season: seasonKey || nextEpisode && nextEpisode.parentRatingKey,
+                suggested: nextEpisode && nextEpisode.ratingKey, picked: pickEpisode, play: primary, load: loadSuggested, land: true
+            } : {
+                page: item.ratingKey, show: item.grandparentRatingKey, season: seasonKey || item.parentRatingKey,
+                suggested: item.ratingKey, play: primary, load: loadSuggested
+            });
+        }
 
-        var credits = (item.Role || []).concat(item.Director || [], item.Writer || []).slice(0, 60);
+        // The top of the cast, then View all for everyone (openCast).
+        var credits = partial ? [] : creditsOf(item);
         if (credits.length) {
             var cast = element("section", "detail-section");
             cast.appendChild(element("h3", "detail-section-title", translate("Cast & Crew")));
             var row = element("div", "detail-cast-row");
-            credits.forEach(function (person) {
-                var node = button(row, person.tag || "Cast", function () {
-                    visit(function () { openPerson(person, client); });
-                }, true);
-                node.className = "detail-person";
-                var face = element("img", "detail-person-photo");
-                face.alt = "";
-                node.appendChild(face);
-                var role = person.role || (item.Director || []).indexOf(person) !== -1 && translate("Director") ||
-                    (item.Writer || []).indexOf(person) !== -1 && translate("Writer") || "";
-                if (role) { node.appendChild(element("span", "detail-person-role", role)); }
-                queueImage(face, client, person.thumb, { width: 200, height: 200 });
+            credits.slice(0, CAST_ON_PAGE).forEach(function (person) {
+                personCard(row, person, client, creditRole(item, person), false, function () {
+                    visit(function () { openCast(item, client, person); });
+                });
             });
+            if (credits.length > CAST_ON_PAGE) {
+                var viewAll = button(row, translate("View all"), function () { visit(function () { openCast(item, client); }); }, true);
+                viewAll.className = "detail-person";
+                viewAll.appendChild(element("span", "detail-person-photo detail-person-count", "+" + (credits.length - CAST_ON_PAGE)));
+            }
             cast.appendChild(row);
             screen.appendChild(cast);
         }
-        var extras = item.Extras && item.Extras.Metadata || [];
+        var extras = !partial && item.Extras && item.Extras.Metadata || [];
         if (extras.length) {
             var shelf = element("section", "shelf detail-section");
             shelf.appendChild(element("h3", "detail-section-title", translate("Extras and trailers")));
@@ -3547,11 +4051,25 @@
         }
         setStatus("Choose Play or Resume to start playback. Browsing does not update watch history.");
         var restoringFocus = !!pendingRestore;
-        focusFirst();
-        if (playable && !restoringFocus) { primary.focus(); }
+        if (onPills !== null) {
+            // The answer came while the cursor was on the Play row: the same button, or Play if it is gone.
+            var same = Array.prototype.filter.call(actions.querySelectorAll("button"), function (node) { return node.textContent === onPills; })[0];
+            (same || primary || actions.querySelector("button")).focus();
+        } else if (refill && active && active !== screen && active !== document.body) {
+            // The cursor has gone on, to a menu or the like: it stays.
+            restoringFocus = true;
+        } else if (restoringFocus ? partial || browsing : item.type === "show") {
+            // A restore counts controls and a show's cursor goes to its episode row, so both wait for what is still to come.
+            parkFocus();
+        } else {
+            focusFirst();
+            if (primary && !restoringFocus) { primary.focus(); }
+        }
+        // Parked on its way to the suggested episode, the page starts it now.
+        if (item.type === "show" && !partial && !seasonKey && !restoringFocus) { holdStart(client, loadSuggested); }
     }
 
-    function confirmWatchAction(item, client, action) {
+    function confirmWatchAction(item, client, action, reopen) {
         visit(function () {
             var generation = ++viewGeneration;
             clear(screen);
@@ -3578,12 +4096,13 @@
                     return action === "remove" ? client.removeContinueWatching(item.ratingKey) :
                         client.setWatched(item.ratingKey, action === "watched");
                 }).then(function () {
+                    forgetDetails();
                     if (generation !== viewGeneration) { return; }
                     setStatus("Plex accepted the change. Refreshing details...");
                     return client.getMetadata(item.ratingKey).then(function (updated) {
                         if (generation !== viewGeneration) { return; }
                         navigation.pop();
-                        renderDetail(updated, client);
+                        if (reopen) { reopen(); } else { renderDetail(updated, client); }
                         setStatus("Plex accepted the change; details were refreshed.");
                     }).catch(function () {
                         if (generation === viewGeneration) {
@@ -3822,13 +4341,26 @@
         label.textContent = (delay > 0 ? "+" : "") + (delay / 1000).toFixed(1) + " s";
     }
 
-    function subtitleTimingRange() {
-        return playerSettings && playerSettings.subtitleSidecar ? [-60000, 60000] : [0, 60000];
+    // AVPlay reports the time about twice a second, so a cue that starts or ends between two reports gets a timer
+    // instead of being up to half a second late. Each report replaces the timer: a seek cannot bring back an old cue.
+    function drawCue(position) {
+        if (cueTimer !== null) { clearTimeout(cueTimer); cueTimer = null; }
+        var node = externalCues && document.getElementById("subtitle-text");
+        if (!node) { return; }
+        var shown = position - preferences.subtitleDelayMs;
+        var change = window.VemmSubtitles.next(externalCues, shown);
+        node.textContent = window.VemmSubtitles.at(externalCues, shown);
+        if (change - shown > 1000) { return; }
+        cueTimer = setTimeout(function () {
+            cueTimer = null;
+            if (player && externalCues && player.snapshot().state === "playing") {
+                node.textContent = window.VemmSubtitles.at(externalCues, change);
+            }
+        }, change - shown);
     }
 
     function storeSubtitleDelay(delay) {
-        var range = subtitleTimingRange();
-        var next = Math.max(range[0], Math.min(range[1], delay));
+        var next = Math.max(-60000, Math.min(60000, delay));
         var previous = preferences.subtitleDelayMs;
         preferences.subtitleDelayMs = next;
         if (!savePreferences()) {
@@ -3837,10 +4369,7 @@
             return false;
         }
         updateSubtitleTimingLabel();
-        var text = document.getElementById("subtitle-text");
-        if (text && externalCues) {
-            text.textContent = window.VemmSubtitles.at(externalCues, currentPlayerPosition() - next);
-        }
+        drawCue(currentPlayerPosition());
         setStatus(translate("Subtitle delay: {value}", {
             value: (next > 0 ? "+" : "") + (next / 1000).toFixed(1) + " s"
         }));
@@ -3849,9 +4378,6 @@
 
     function openSubtitleTiming() {
         if (!player) { return; }
-        var range = subtitleTimingRange();
-        var bounded = Math.max(range[0], Math.min(range[1], preferences.subtitleDelayMs));
-        if (bounded !== preferences.subtitleDelayMs && !storeSubtitleDelay(bounded)) { return; }
         cancelHudTimer();
         var menu = document.getElementById("player-menu");
         if (menu && menu.parentNode) { menu.parentNode.removeChild(menu); }
@@ -4040,103 +4566,6 @@
         return countdown;
     }
 
-    function openPerson(person, client, careerStart) {
-        var generation = ++viewGeneration;
-        clear(screen);
-        viewClients.push(client);
-        resetImages();
-        restoreView = function () { openPerson(person, client, careerStart); };
-        retryView = restoreView;
-        page(person.tag || "Person", "person");
-        var portrait = element("img", "person-portrait");
-        portrait.alt = "";
-        portrait.src = placeholderArt();
-        screen.appendChild(portrait);
-        queueImage(portrait, client, person.thumb, { width: 360, height: 360 });
-        if (person.role) { screen.appendChild(element("p", "detail-meta", person.role)); }
-        button(screen, "Titles in this server", function () {
-            visit(function () {
-                openListing(person.tag || "Person", function (offset) {
-                    return client.getPerson(null, person.id, offset);
-                }, client);
-            });
-        });
-        button(screen, "Back", backView);
-        setStatus(accountClient && person.tagKey ? "Loading..." : "Person biography and catalogue credits require a linked Plex account.");
-        if (accountClient && person.tagKey) {
-            accountClient.personProfile(person.tagKey).then(function (container) {
-                if (generation !== viewGeneration) { return; }
-                var profile = (container.Metadata || [])[0] || {};
-                screen.appendChild(element("p", "synopsis", profile.summary || "No biography supplied by Plex."));
-                if (profile.bornAt) {
-                    screen.appendChild(element("p", "detail-meta", profile.bornAt + (profile.birthPlace ? " / " + profile.birthPlace : "")));
-                }
-            }).catch(function (error) {
-                if (generation === viewGeneration) { setStatus(errorText(error), true); focusFirst(); }
-            });
-            var localIndex = client.personLibraryIndex(person.id).catch(function () { return null; });
-            Promise.all([accountClient.personCredits(person.tagKey), localIndex]).then(function (results) {
-                var groups = results[0];
-                var local = results[1];
-                if (generation !== viewGeneration) { return; }
-                var allCredits = [];
-                var held = 0;
-                groups.forEach(function (group) {
-                    (group.Credit || []).forEach(function (credit) {
-                        if (credit.Metadata) { allCredits.push({ group: group.title, credit: credit }); }
-                    });
-                });
-                var career = element("section", "career-pages");
-                screen.appendChild(career);
-                function renderCareer(start) {
-                    careerStart = start;
-                    clear(career);
-                    held = 0;
-                    var credits;
-                    var groupName;
-                    allCredits.slice(start, start + 50).forEach(function (entry) {
-                        var credit = entry.credit;
-                        var title = credit.Metadata;
-                        if (!credits || groupName !== entry.group) {
-                            groupName = entry.group;
-                            credits = element("section", "credit-list");
-                            credits.appendChild(element("h3", "group-title", groupName || "Credits"));
-                            career.appendChild(credits);
-                        }
-                        var label = (title.title || "Untitled") + (title.year ? " / " + title.year : "") +
-                            (credit.role ? " / " + credit.role : "");
-                        var ratingKey = local && window.PlexApi.matchCredit(local.index, title.ratingKey);
-                        if (ratingKey) {
-                            held += 1;
-                            titleTile(credits, { title: label + " / " + translate("In this library"), thumb: title.thumb }, function () {
-                                visit(function () { openDetail(ratingKey, client); });
-                            }, client);
-                        } else {
-                            titleTile(credits, { title: label + " / " + translate("Search libraries"), thumb: title.thumb }, function () {
-                                visit(function () { openSearch(title.title); });
-                            }, client);
-                        }
-                    });
-                    if (start > 0) {
-                        button(career, "Previous page", function () { renderCareer(start - 50); }).focus();
-                    }
-                    if (start + 50 < allCredits.length) {
-                        var nextPage = button(career, "Next page", function () { renderCareer(start + 50); });
-                        if (start === 0 && document.activeElement && !screen.contains(document.activeElement)) { nextPage.focus(); }
-                    }
-                    setStatus(local ? translate("{count} credits are in this library.", { count: held }) +
-                        (local.complete ? "" : " " + translate("Local title lookup reached its safety limit.")) :
-                        translate("This server's titles could not be checked. Search libraries to find an available version."));
-                }
-                renderCareer(careerStart || 0);
-                focusFirst();
-            }).catch(function (error) {
-                if (generation === viewGeneration) { setStatus(errorText(error), true); focusFirst(); }
-            });
-        }
-        focusFirst();
-    }
-
     var RECONNECT_MS = 120000;
     var RECONNECT_REOPENS = 3;
     var STALL_MS = 6000;
@@ -4244,8 +4673,7 @@
         var tracks = {
             audioId: settings.audioId,
             subtitleId: settings.subtitleId,
-            paused: wantsPause(),
-            subtitleSidecar: settings.subtitleSidecar
+            paused: wantsPause()
         };
         if (settings.overlaySubtitle && externalCues) { tracks.cues = externalCues; }
         stopPlayer(function () { startPlayer(item, client, position, settings.mediaIndex, tracks); });
@@ -4431,6 +4859,235 @@
 
     function openPlaylists() {
         openListing("Playlists", function (offset) { return currentClient.getPlaylists(offset); }, currentClient);
+    }
+
+    // Live TV: the channels of an M3U playlist link the viewer pasted (js/iptv.js). The link and the channel addresses
+    // are secrets. They live in the one stored link and in memory, and no message, log entry or request carries them.
+    function iptvLink() { return window.VemmIptv ? window.VemmIptv.source(window.localStorage) : ""; }
+    var iptvLoaded = null;
+    // The playlist at the stored link, read once and kept for this session.
+    function iptvPlaylist() {
+        var link = iptvLink();
+        if (!iptvLoaded || iptvLoaded.link !== link) {
+            var entry = iptvLoaded = { link: link, promise: window.VemmIptv.load(link) };
+            entry.promise.catch(function () { if (iptvLoaded === entry) { iptvLoaded = null; } });
+        }
+        return iptvLoaded.promise;
+    }
+    function iptvMessage(error) {
+        var code = error && error.code;
+        return translate(code === "http" ? "The provider refused the playlist link. Check the link, including any username and password." :
+            code === "timeout" ? "The playlist took too long to load." :
+            code === "size" ? "The link is not a channel list: it is too large." :
+            code === "empty" ? "The link did not return a channel list." :
+            "The playlist could not be read. Check the link and the TV's connection. Some providers do not let apps read their playlists.");
+    }
+    function liveMessage(code) {
+        return translate(code === "connection" ? "The channel could not be reached. It may be offline, or the connection dropped." :
+            code === "address" ? "This channel has an invalid address." :
+            code === "format" ? "This TV cannot play this channel's video format." :
+            code === "timeout" || code === "silent" ? "The channel did not start. It may be offline." :
+            "The channel stopped with an error.");
+    }
+
+    function openIptvLink() {
+        viewGeneration += 1;
+        retryView = null;
+        clear(screen);
+        resetImages();
+        page(translate("Playlist link"), "search");
+        var keyboard = window.VemmSearchUi.keyboard({
+            element: element, translate: translate, label: "Playlist link", hint: "Type the M3U playlist link",
+            rows: ["abcdefghijkl", "mnopqrstuvwx", "yz0123456789", ":/.?=&_-%@+~", "#,;!$*()[]'^"], upper: true, max: 2000, tail: 60
+        });
+        var panel = element("div", "search-panel");
+        window.VemmSearchUi.link(keyboard, panel);
+        button(panel, "Save link", function () {
+            var text = keyboard.value();
+            if (!window.VemmIptv.link(text)) { setStatus("Enter a link that starts with http:// or https://.", true); return; }
+            if (!window.VemmIptv.saveSource(window.localStorage, text)) { setStatus("Could not save the link. Check app storage permissions.", true); return; }
+            iptvLoaded = null;
+            backView();
+        });
+        panel.appendChild(element("p", "help-text", translate("The link is kept only on this TV. It is not shown again once saved.")));
+        screen.appendChild(keyboard.node);
+        keyboard.attach(panel);
+        restoreView = openIptvLink;
+        setStatus("");
+        keyboard.focus();
+    }
+
+    // The groups of the playlist, one row each (a big group in pages), and the last channel watched.
+    function openLiveTv() {
+        var generation = ++viewGeneration;
+        var body = settingsPage(translate("Live TV"));
+        restoreView = retryView = openLiveTv;
+        setStatus("Loading channels…");
+        iptvPlaylist().then(function (playlist) {
+            if (generation !== viewGeneration) { return; }
+            var saved = window.VemmIptv.find(playlist, window.VemmIptv.last(window.localStorage));
+            if (saved) {
+                var channels = playlist.groups[saved.group].channels;
+                opens(valueRow(body.list, translate("Last channel"), channels[saved.at].name, function () {
+                    visit(function () { openLive(channels, saved.at); });
+                }, "television"));
+            }
+            window.VemmIptv.pages(playlist).forEach(function (part) {
+                var title = part.name || translate("Other");
+                if (part.count > window.VemmIptv.PAGE) { title += " " + (part.from + 1) + "–" + part.to; }
+                opens(valueRow(body.list, title, String(part.to - part.from), function () {
+                    visit(function () { openChannelList(playlist, part, 0); });
+                }));
+            });
+            setStatus("");
+            focusFirst();
+        }).catch(function (error) {
+            if (generation !== viewGeneration) { return; }
+            setStatus(iptvMessage(error), true);
+            focusFirst();
+        });
+    }
+
+    // One page of a group as cards. They are added 60 at a time as focus nears the last one, and their logos load only
+    // near the screen (syncLibraryArt), so a group of any size costs what is in view. A Back from a channel redraws as
+    // many as were shown (reached).
+    function openChannelList(playlist, part, reached) {
+        viewGeneration += 1;
+        var channels = playlist.groups[part.group].channels;
+        clear(screen);
+        resetImages();
+        page(part.name || translate("Other"), "library");
+        retryView = null;
+        var list = element("div", "item-list");
+        list.id = "item-list";
+        screen.appendChild(list);
+        var shown = part.from;
+        var saved = window.VemmIptv.find(playlist, window.VemmIptv.last(window.localStorage));
+        var latest = saved && saved.group === part.group && saved.at >= part.from && saved.at < part.to ? saved.at : -1;
+        function more(count) {
+            var cards = document.createDocumentFragment();
+            for (var end = Math.min(part.to, shown + count); shown < end; shown += 1) {
+                (function (at) {
+                    var channel = channels[at];
+                    var node = card(cards, { type: "channel", title: channel.name || translate("Channel {number}", { number: at + 1 }), thumb: channel.logo },
+                        null, null, { library: true, lazy: true, direct: true, open: function () { visit(function () { openLive(channels, at); }); } });
+                    node.vemmIndex = at;
+                }(shown));
+            }
+            list.appendChild(cards);
+            restoreView = function () { openChannelList(playlist, part, shown - part.from); };
+            syncLibraryArt();
+        }
+        list.addEventListener("focus", function (event) {
+            scheduleLibraryArt();
+            if (event.target.vemmIndex !== undefined && shown < part.to && shown - event.target.vemmIndex <= 30) { more(60); }
+        }, true);
+        screen.addEventListener("scroll", scheduleLibraryArt, false);
+        more(Math.max(60, reached || 0, latest + 31 - part.from));
+        setStatus("");
+        focusFirst();
+        // The channel last watched, which after a Back is the one the viewer changed to, not the one opened.
+        if (latest >= 0) { list.children[latest - part.from].focus(); }
+    }
+
+    // A channel, full screen. Up and Down (or the remote's Channel keys) change channel inside the group; Back leaves
+    // for the list. There is no Plex session, progress, resume or seeking, and the timeline says Live.
+    function openLive(channels, at) {
+        viewGeneration += 1;
+        clear(screen);
+        resetImages();
+        retryView = null;
+        restoreView = function () { openLive(channels, at); };
+        var shell = document.querySelector(".app-shell");
+        document.body.className = "playing";
+        var hud = element("section", "player-hud");
+        var title = element("h2", "");
+        var context = element("p", "playback-context");
+        var time = element("div", "playback-time");
+        time.appendChild(element("span", "playback-live", translate("Live")));
+        hud.appendChild(title);
+        hud.appendChild(context);
+        hud.appendChild(time);
+        screen.appendChild(hud);
+        var hideTimer = null;
+        function showLive() {
+            if (hideTimer !== null) { clearTimeout(hideTimer); }
+            hud.hidden = false;
+            shell.classList.remove("hud-hidden");
+            hideTimer = setTimeout(function () {
+                hideTimer = null;
+                if (stream.state() === "playing") { hud.hidden = true; shell.classList.add("hud-hidden"); }
+            }, 5000);
+        }
+        function problem(code) {
+            var panel = element("section", "playback-error");
+            panel.id = "playback-error";
+            panel.setAttribute("role", "alertdialog");
+            panel.appendChild(element("h2", "", translate("Channel problem")));
+            panel.appendChild(element("p", "help-text", liveMessage(code)));
+            button(panel, "Try again", function () { tune(); });
+            button(panel, "Channel list", backView);
+            screen.appendChild(panel);
+            panel.querySelector("button").focus();
+            logError("A Live TV channel failed (" + code + ").");
+        }
+        var stream = window.VemmIptv.live({
+            reconnect: window.VemmReconnect,
+            adapter: window.VemmAvplay.create({
+                avplay: window.webapis && window.webapis.avplay, prepareTimeout: 20000,
+                onEvent: function (event) { stream.event(event); }
+            }),
+            onChange: function (change) {
+                var old = document.getElementById("playback-error");
+                if (old && change.state !== "failed") { old.parentNode.removeChild(old); }
+                if (change.state === "playing") { setBufferRing(null); showReconnecting(false); keepScreenAwake(true); }
+                else if (change.state === "failed") {
+                    setBufferRing(null);
+                    showReconnecting(false);
+                    keepScreenAwake(false);
+                    hud.hidden = false;
+                    shell.classList.remove("hud-hidden");
+                    problem(change.code);
+                    return;
+                } else if (change.state !== "stopped") { setBufferRing(true); showReconnecting(change.state === "reconnecting"); }
+                showLive();
+            }
+        });
+        function tune() {
+            var channel = channels[at];
+            title.textContent = channel.name || translate("Channel {number}", { number: at + 1 });
+            context.textContent = (channel.group || translate("Other")) + " · " + (at + 1) + " / " + channels.length;
+            window.VemmIptv.remember(window.localStorage, channel);
+            stream.tune(channel);
+        }
+        function go(step) {
+            at = (at + step + channels.length) % channels.length;
+            tune();
+        }
+        function keys(event) {
+            var code = event.keyCode;
+            var failed = !!document.getElementById("playback-error");
+            if (code === 427 || (code === 38 && !failed)) { go(1); }
+            else if (code === 428 || (code === 40 && !failed)) { go(-1); }
+            else if (!failed && (code === 13 || code === 37 || code === 39)) { showLive(); }
+            else if ([415, 19, 10252, 412, 417].indexOf(code) !== -1) { /* a live channel has no pause or seek */ }
+            else if (code === 413) { backView(); }
+            else { return; }
+            event.preventDefault();
+            event.stopPropagation();
+        }
+        document.addEventListener("keydown", keys, true);
+        viewCleanup = function () {
+            document.removeEventListener("keydown", keys, true);
+            if (hideTimer !== null) { clearTimeout(hideTimer); }
+            stream.stop();
+            setBufferRing(null);
+            showReconnecting(false);
+            keepScreenAwake(false);
+            document.body.className = "";
+            shell.classList.remove("hud-hidden");
+        };
+        tune();
     }
 
     // Choosing an item of a video playlist plays the playlist from that item.
@@ -4659,33 +5316,23 @@
             productinfo: window.webapis && window.webapis.productinfo, avinfo: window.webapis && window.webapis.avinfo });
         return profile ? profile.maxHeight : 0;
     }
-    // Quality options under resolution headings: Original, 4K, 1440p, 1080p, 720p, 480p, highest Mbps
-    // first. FHD panels do not get 1440p or 4K; the saved choice stays listed so it can be seen.
+    // Quality options: Original, then what the server converts to, highest Mbps first. FHD panels do not get 1440p or
+    // 4K; the saved choice stays listed so it can be seen.
     // keep stays listed; source (a Media) hides rungs above its height or, when known, its kbps bitrate.
     // With a source, a preset shows only up to the file's own size and below its top bitrate (qualityTop):
-    // the 1080p 20/16/12/10 Mbps presets are gone for an 8.1 Mbps episode.
     function qualityGroups(keep, source, top) {
         var height = panelHeight();
-        function mbps(quality) { return quality === "original" ? Infinity : Number(QUALITY_NAMES[quality][1]); }
-        var groups = [];
-        qualityLadder().filter(function (quality) {
-            if (quality === "original" || quality === keep) { return true; }
+        var converted = qualityLadder().filter(function (quality) {
+            if (quality === "original") { return false; }
+            if (quality === keep) { return true; }
             if (source && (Number(QUALITY_NAMES[quality][0]) > sourceLines(source) ||
                     qualityKbps(quality) >= top)) {
                 return false;
             }
             return !height || height >= Number(QUALITY_NAMES[quality][0]);
-        }).sort(function (a, b) { return mbps(b) - mbps(a); }).forEach(function (quality) {
-            var lines = quality === "original" ? "" : QUALITY_NAMES[quality][0];
-            var last = groups[groups.length - 1];
-            if (!last || last.lines !== lines) {
-                last = { lines: lines, qualities: [], title: quality === "original" ? translate("Original") :
-                    lines === "2160" ? translate("4K") : translate("{height}p", { height: lines }) };
-                groups.push(last);
-            }
-            last.qualities.push(quality);
-        });
-        return groups;
+        }).sort(function (a, b) { return Number(QUALITY_NAMES[b][1]) - Number(QUALITY_NAMES[a][1]); });
+        return [{ title: "", qualities: ["original"] }].concat(converted.length ?
+            [{ title: translate("Converted by the server"), converted: true, qualities: converted }] : []);
     }
     function serverName() {
         var named = servers.filter(function (server) { return server.id === currentServerId; })[0];
@@ -4807,7 +5454,7 @@
     function qualityName(quality) {
         var rung = QUALITY_NAMES[quality];
         if (quality === "original" || !rung) { return translate("Original quality"); }
-        return translate("{height}p · {mbps} Mbps (converts)", { height: rung[0], mbps: rung[1] });
+        return translate("{height}p · {mbps} Mbps", { height: rung[0], mbps: rung[1] });
     }
     // Results are kept per Plex server id; a manually entered server shares one "manual" slot.
     function speedKey() { return currentServerId || "manual"; }
@@ -4902,16 +5549,33 @@
             return { value: value, label: labelForValue(value) };
         });
         var selected = options.filter(function (option) { return option.value === preferences[preferenceKey]; })[0];
-        button(parent, translate("{setting}: {value}", {
-            setting: translate(title), value: selected ? translate(selected.label) : ""
-        }), function () {
+        return opens(valueRow(parent, translate(title), selected ? translate(selected.label) : "", function () {
             settingsChoices(title, options.map(function (option) {
                 return { value: option.value, label: translate(option.label), swatch: swatch && swatch(option.value) };
             }), preferences[preferenceKey], function (value) {
                 preferences[preferenceKey] = value;
                 if (savePreferences()) { backView(); }
-            }, preferenceKey.indexOf("subtitle") === 0 ? syncSubtitlePreview : preferenceKey === "minBuffer" ? bufferWarning : undefined);
-        }, false, "settings");
+            }, preferenceKey === "minBuffer" ? bufferWarning : undefined);
+        }));
+    }
+
+    // The text overlay's looks, the same rows in Settings and the player: OK steps to the next value, applied at once.
+    function subtitleLookRows(parent, applied) {
+        [["Text size", "subtitleSize", ["small", "medium", "large", "extra_large"],
+            function (value) { return { small: "Small", medium: "Medium", large: "Large", extra_large: "Extra large" }[value]; }],
+        ["Text position", "subtitlePosition", ["low", "middle", "high"],
+            function (value) { return { low: "Low", middle: "Middle", high: "High" }[value]; }],
+        ["Text color", "subtitleColor", SUBTITLE_COLORS, colorName],
+        ["Text background", "subtitleBackground", ["off", "on"], backgroundName]].forEach(function (look) {
+            var key = look[1];
+            var row = valueRow(parent, translate(look[0]), translate(look[3](preferences[key])), function () {
+                var values = look[2];
+                preferences[key] = values[(values.indexOf(preferences[key]) + 1) % values.length];
+                if (!savePreferences()) { return; }
+                setRowValue(row, translate(look[3](preferences[key])));
+                applied();
+            });
+        });
     }
 
     function ratingName(source) {
@@ -4923,9 +5587,9 @@
     function openRatingSourceChoices() {
         settingsChoices("Ratings shown", function () {
             return window.VemmPreferences.ratingSources.map(function (source) {
-                return { value: source, label: ratingName(source), literal: true };
+                return { value: source, label: ratingName(source), literal: true, on: preferences.ratingSources.indexOf(source) !== -1 };
             });
-        }, function () { return null; }, function (source) {
+        }, null, function (source) {
             var previous = preferences.ratingSources;
             var on = previous.indexOf(source) === -1;
             preferences.ratingSources = window.VemmPreferences.ratingSources.filter(function (candidate) {
@@ -4934,11 +5598,6 @@
             if (!savePreferences()) { preferences.ratingSources = previous; return; }
             Array.prototype.forEach.call(screen.querySelectorAll("button"), function (row) {
                 if (row.textContent === ratingName(source)) { row.setAttribute("aria-pressed", String(on)); }
-            });
-        }, function (menu) {
-            Array.prototype.forEach.call(menu.querySelectorAll("button"), function (row, index) {
-                var source = window.VemmPreferences.ratingSources[index];
-                if (source) { row.setAttribute("aria-pressed", String(preferences.ratingSources.indexOf(source) !== -1)); }
             });
         });
     }
@@ -4973,10 +5632,10 @@
     function openLibrarySourceChoices(client, entries) {
         function optionLabel(entry) {
             var current = entry.pref.options.filter(function (option) { return option.value === entry.pref.value; })[0];
-            return entry.title + ": " + (current ? current.label : entry.pref.value);
+            return current ? current.label : entry.pref.value;
         }
         settingsChoices("Library ratings source", function () {
-            return entries.map(function (entry) { return { value: entry.key, label: optionLabel(entry), literal: true }; });
+            return entries.map(function (entry) { return { value: entry.key, label: entry.title, detail: optionLabel(entry) }; });
         }, null, function (key) {
             var entry = entries.filter(function (candidate) { return candidate.key === key; })[0];
             settingsChoices(entry.title, entry.pref.options.map(function (option) {
@@ -4998,7 +5657,7 @@
     function libraryRatingSourceEntry(parent, client) {
         librarySourceEntries(client).then(function (entries) {
             if (!entries.length || !parent.parentNode || client !== currentClient) { return; }
-            button(parent, "Library ratings source", function () { openLibrarySourceChoices(client, entries); }, false, "settings");
+            opens(button(parent, "Library ratings source", function () { openLibrarySourceChoices(client, entries); }));
         });
     }
 
@@ -5017,31 +5676,23 @@
 
     // A submenu of More: Back returns to More, on the entry that opened it.
     function playerSubmenu(title, from) {
-        cancelHudTimer();
-        var old = document.getElementById("player-menu");
-        if (old) { old.parentNode.removeChild(old); }
-        var menu = element("section", "player-menu");
-        menu.id = "player-menu";
-        menu.plexDismiss = function () { openPlaybackOptions(from); };
-        menu.appendChild(element("h2", "", translate(title)));
-        return menu;
+        return sidePanel(translate(title), false, function () { openPlaybackOptions(from); });
     }
 
     // The choice applies to the next AVPlay open, so restart the stream where it is.
     function openBufferChoices() {
         if (!player) { return; }
         var menu = playerSubmenu("Minimum buffer", "buffer");
-        bufferWarning(null, menu);
+        bufferWarning(null, menu.list);
         bufferChoices().forEach(function (seconds) {
             var chosen = preferences.minBuffer === seconds;
-            button(menu, bufferName(seconds), function () {
+            button(menu.list, bufferName(seconds), function () {
                 if (chosen) { openPlaybackOptions("buffer"); return; }
                 preferences.minBuffer = seconds;
                 if (savePreferences()) { recoverPlayer(false); }
             }, true).setAttribute("aria-pressed", String(chosen));
         });
-        screen.appendChild(menu);
-        (menu.querySelector('[aria-pressed="true"]') || menu.querySelector("button")).focus();
+        showPanel(menu);
     }
 
     var SKIP_MODES = ["button", "auto", "off"];
@@ -5056,11 +5707,11 @@
     function openSkipChoices(focusChoice) {
         if (!player) { return; }
         var menu = playerSubmenu("Intro and credits", "skip");
-        menu.appendChild(element("p", "help-text", translate("For {title} on this TV.", {
+        menu.list.appendChild(element("p", "help-text", translate("For {title} on this TV.", {
             title: playerItem.type === "episode" && playerItem.grandparentTitle || playerItem.title || "" })));
         var focus = null;
         ["intro", "credits"].forEach(function (type) {
-            var list = group(menu, translate(type === "intro" ? "Intros" : "Credits"), "menu-group");
+            var list = group(menu.list, translate(type === "intro" ? "Intros" : "Credits"));
             var saved = skipOverride(playerItem, type);
             var setting = preferences[type === "intro" ? "skipIntro" : "skipCredits"];
             [null].concat(SKIP_MODES).forEach(function (mode) {
@@ -5076,49 +5727,45 @@
                 if (focusChoice === type + ":" + mode) { focus = row; }
             });
         });
-        screen.appendChild(menu);
-        (focus || menu.querySelectorAll("button")[0]).focus();
+        showPanel(menu, focus);
     }
 
     // More: Back closes it. from ("quality", "buffer", "skip") refocuses the entry a submenu came from.
     function openPlaybackOptions(from) {
         if (!player) { return; }
         cancelScrub();
-        cancelHudTimer();
-        var old = document.getElementById("player-menu");
-        if (old) { old.parentNode.removeChild(old); }
-        var menu = element("section", "player-menu");
-        menu.id = "player-menu";
-        menu.plexDismiss = closePlayerMenu;
-        menu.appendChild(element("h2", "", translate("Playback options")));
+        var menu = sidePanel(translate("Playback options"), false, closePlayerMenu);
+        var list = menu.list;
+        var fit = playerQuality();
         var entries = {};
-        entries.quality = button(menu, "Quality and version", openQuality);
-        entries.buffer = button(menu, translate("{setting}: {value}", { setting: translate("Minimum buffer"),
-            value: bufferName(preferences.minBuffer) }), openBufferChoices, true);
+        entries.quality = opens(valueRow(list, translate("Quality and version"),
+            qualityChoiceName(fit.chosen, fit.source, fit.top), openQuality));
+        entries.buffer = opens(valueRow(list, translate("Minimum buffer"), bufferName(preferences.minBuffer), openBufferChoices));
         if ((playerItem.Marker || []).some(function (marker) { return marker.type === "intro" || marker.type === "credits"; })) {
-            entries.skip = button(menu, "Intro and credits", function () { openSkipChoices(); });
+            entries.skip = opens(button(list, "Intro and credits", function () { openSkipChoices(); }));
         }
-        if (externalCues) { button(menu, "Subtitle timing", openSubtitleTiming); }
+        if (externalCues) { button(list, "Subtitle timing", openSubtitleTiming); }
         if (playerItem.type === "track") {
-            button(menu, "Previous track", function () { skipMusic(-1, false); });
-            button(menu, "Next track", function () { skipMusic(1, false); });
-            button(menu, "Shuffle / On or off", function () {
+            button(list, "Previous track", function () { skipMusic(-1, false); });
+            button(list, "Next track", function () { skipMusic(1, false); });
+            var shuffle = switchRow(list, translate("Shuffle"), !!queueShuffle, function () {
                 queueShuffle = musicQueue.shuffle(!queueShuffle);
-                setStatus(translate(queueShuffle ? "Shuffle on." : "Shuffle off."));
+                setSwitch(shuffle, !!queueShuffle);
             });
-            button(menu, "Repeat / Off, one, all", function () {
+            function repeatName() { return translate({ off: "Off", one: "One", all: "All" }[queueRepeat]); }
+            var repeat = valueRow(list, translate("Repeat"), repeatName(), function () {
                 queueRepeat = queueRepeat === "off" ? "one" : queueRepeat === "one" ? "all" : "off";
                 musicQueue.repeat(queueRepeat);
-                setStatus(translate("Repeat") + ": " + translate(queueRepeat));
+                setRowValue(repeat, repeatName());
             });
         }
-        button(menu, "Stop and return to details", stopPlayer);
-        button(menu, "Stats for nerds", function () {
+        button(list, "Stop and return to details", stopPlayer);
+        button(list, "Stats for nerds", function () {
             closePlayerMenu();
             togglePlayerStats();
         });
-        screen.appendChild(menu);
-        (typeof from === "string" && entries[from] || menu.querySelector("button")).focus();
+        // This menu holds settings, not one choice: focus starts at its top.
+        showPanel(menu, typeof from === "string" && entries[from] || list.querySelector("button"));
     }
 
     // What a start asks for; a background start (preloadOnFocus) is used only when this matches exactly.
@@ -5128,7 +5775,7 @@
             audioId: trackOptions ? trackOptions.audioId : undefined,
             subtitleId: trackOptions ? trackOptions.subtitleId : undefined,
             overlaySubtitle: !!(trackOptions && trackOptions.cues),
-            subtitleSidecar: !!(trackOptions && trackOptions.subtitleSidecar),
+            automaticTracks: !!(trackOptions && trackOptions.automatic),
             paused: !!(trackOptions && trackOptions.paused),
             profile: directPlayProfile(), directPlay: preferences.directPlay,
             minBuffer: preferences.minBuffer, mbps: (recentSpeed() || {}).mbps
@@ -5151,24 +5798,37 @@
         return { key: preloadKey(item, settings), settings: settings, session: session, relay: relay };
     }
 
-    // A Play control that keeps focus for 0.6 s starts its stream in the background (js/preload.js): the
-    // decision and the AVPlay prepare at the resume point, so pressing it only shows the picture. Nothing
-    // is written to Plex before the press; moving away, another start or leaving the page discards it and
-    // its server conversion. load() gives { item, offset } (full metadata), or null for no preload.
-    function preloadOnFocus(node, client, load) {
-        node.addEventListener("focus", function () {
-            preload.arm(function () {
-                var loading = !player && !playerClosing && !document.hidden && window.webapis && window.webapis.avplay && load();
-                return loading && loading.then(function (target) {
-                    if (!target || player || playerClosing || rememberedTracks(target.item, 0)) { return null; }
-                    var pipeline = playbackPipeline(target.item, client, playbackSettings(target.offset, 0));
-                    pipeline.ready = pipeline.session.prepare();
-                    pipeline.discard = function () { pipeline.session.stop().catch(function () { /* nothing to report */ }); };
-                    return pipeline;
-                });
+    // A background start (js/preload.js): the decision and the AVPlay prepare at the resume point, so pressing
+    // play only shows the picture. Nothing is written to Plex before the press, and discarding it stops its
+    // server conversion. load() gives { item, offset } (full metadata), or null for no background start.
+    function backgroundStart(client, load) {
+        return function () {
+            var loading = !player && !playerClosing && !document.hidden && window.webapis && window.webapis.avplay && load();
+            return loading && loading.then(function (target) {
+                if (!target || player || playerClosing || rememberedTracks(target.item, 0)) { return null; }
+                var pipeline = playbackPipeline(target.item, client, playbackSettings(target.offset, 0));
+                // AVPlay dropping it while it waits ends it; focusing its item again prepares it again.
+                pipeline.relay.adapter = function (event) { if (event.type === "error") { preload.cancel(); } };
+                pipeline.ready = pipeline.session.prepare();
+                pipeline.discard = function () { pipeline.session.stop().catch(function () { /* nothing to report */ }); };
+                return pipeline;
             });
-        });
+        };
+    }
+
+    // A Continue Watching card that keeps focus for 0.6 s starts in the background; moving away discards it.
+    function preloadOnFocus(node, client, load) {
+        node.addEventListener("focus", function () { preload.arm(backgroundStart(client, load)); });
         node.addEventListener("blur", function () { preload.cancel(); });
+    }
+
+    // A details page's Play and suggested episode start the page's one background start at once. Focus moving on
+    // does not touch it: it lasts until it is pressed or the page is left (clear, visibilitychange, pagehide).
+    function holdStart(client, load) {
+        if (!upNextPage) { preload.hold(backgroundStart(client, load)); }
+    }
+    function holdOnFocus(node, client, load) {
+        node.addEventListener("focus", function () { holdStart(client, load); });
     }
 
     // Until a start's picture moves, the page Play was pressed on stays on screen under the spinner instead of the
@@ -5180,14 +5840,19 @@
         var still = element("div", "detail-mode player-still");
         var page = element("main", screen.className);
         var scroll = screen.scrollTop;
+        // A moved row forgets how far along it was.
+        var rows = Array.prototype.slice.call(screen.querySelectorAll(".shelf-row"));
+        var along = rows.map(function (row) { return row.scrollLeft; });
         while (screen.firstChild) { page.appendChild(screen.firstChild); }
         Array.prototype.forEach.call(page.querySelectorAll("[id]"), function (node) { node.removeAttribute("id"); });
         still.appendChild(page);
         document.body.appendChild(still);
         page.scrollTop = scroll;
+        rows.forEach(function (row, at) { row.scrollLeft = along[at]; });
         return true;
     }
 
+    var upNextPage = false;
     function dropStill() {
         var still = document.querySelector(".player-still");
         if (still) { still.parentNode.removeChild(still); }
@@ -5198,16 +5863,17 @@
         var listQueue = playlistQueue;
         playlistQueue = null;
         if (player || playerClosing) { return; }
+        if (playReturn) { navigation.push({ restore: playReturn, afterPlay: true }); }
         var reopened = reconnectResume;
         reconnectResume = false;
         if (!reopened) { reconnectOpens = 0; }
         reconnectFrom = reopened ? offset : null;
         if (!trackOptions || trackOptions.audioId === undefined && trackOptions.subtitleId === undefined) {
-            // Another episode of a show whose tracks the viewer picked before.
+            // Another episode of a show whose tracks the viewer picked before (js/track-memory.js).
             var remembered = rememberedTracks(item, mediaIndex);
             if (remembered) {
                 var own = trackOptions || {};
-                trackOptions = { audioId: remembered.audioId, subtitleId: remembered.subtitleId, cues: own.cues, paused: own.paused };
+                trackOptions = { audioId: remembered.audioId, subtitleId: remembered.subtitleId, cues: own.cues, paused: own.paused, automatic: true };
             }
         }
         var settings = playbackSettings(offset, mediaIndex, trackOptions);
@@ -5231,7 +5897,6 @@
         // A reopen after a drop keeps saying so until the picture moves.
         if (reopened) { showReconnecting(true); }
         hudFocus = null;
-        scrubReturnFocus = null;
         playerPanel = "";
         playerStatsVisible = false;
         subtitleTiming = false;
@@ -5288,6 +5953,7 @@
         hud.appendChild(progress);
         var subtitle = element("p", "subtitle-text");
         subtitle.id = "subtitle-text";
+        subtitle.setAttribute("dir", "auto");
         applySubtitleAppearance(subtitle);
         screen.appendChild(subtitle);
         var controls = element("div", "playback-controls");
@@ -5437,13 +6103,7 @@
                     }
                     if (startup.started && event.position !== startup.position) { endStartup(); }
                     updateSkip(event.position);
-                    if (externalCues) {
-                        var externalSubtitle = document.getElementById("subtitle-text");
-                        if (externalSubtitle) {
-                            externalSubtitle.textContent = window.VemmSubtitles.at(externalCues,
-                                event.position - preferences.subtitleDelayMs);
-                        }
-                    }
+                    drawCue(event.position);
                 } else if (event.type === "subtitle") {
                     if (externalCues) { return; }
                     var text = document.getElementById("subtitle-text");
@@ -5503,9 +6163,9 @@
                 }).catch(function () { /* the queue is optional; playback and progress continue without it */ });
             }
             player = ownPlayer;
-            player.start().then(function () {
+            player.start().then(function (started) {
                 if (player === ownPlayer) {
-                    setStatus("");
+                    setStatus(started && started.subtitleRefused ? "Plex could not add this subtitle to the video. Try another subtitle track." : "");
                     startup.started = true;
                     startup.position = ownPlayer.snapshot().position;
                     if (ownPlayer.snapshot().state === "paused") { endStartup(); }
@@ -5686,11 +6346,13 @@
         subtitleTiming = false;
         if (nextTimer !== null) { clearTimeout(nextTimer); nextTimer = null; }
         if (subtitleTimer !== null) { clearTimeout(subtitleTimer); subtitleTimer = null; }
+        if (cueTimer !== null) { clearTimeout(cueTimer); cueTimer = null; }
         var closing = player;
         var item = playerItem;
         var client = playerClient;
         var safeToLeave = true;
         playerSkipRefresh = null;
+        forgetDetails();
         return closing.stop().then(function (metadata) { item = metadata || item; }, function (error) {
             showPlayerError(error);
             safeToLeave = closing.snapshot().state === "idle";
@@ -5702,6 +6364,7 @@
             playerClosing = false;
             document.body.className = "";
             if (typeof after === "function") { after(); }
+            else if (navigation.length && navigation[navigation.length - 1].afterPlay) { navigation.pop().restore(); }
             else { renderDetail(item, client); }
             if (typeof after !== "function") { musicQueue = null; }
         });
@@ -5710,8 +6373,10 @@
     // Restart playback at the current position with an explicit track choice. `cues` keeps an
     // app-rendered text overlay; only "Subtitles off" may send subtitleStreamID=0, because moving
     // the PMS selection off a downloaded subtitle deletes it (docs/pms-api.md section 8).
-    // The audio/subtitle language a viewer picked is kept for the show on this TV (js/track-memory.js) and chosen
-    // again in its other episodes that have it; a movie keeps what Plex remembers for its file.
+    // The audio/subtitle language a viewer picked is kept for the show on this TV (js/track-memory.js) and chosen again
+    // in its other episodes that have it; a movie keeps what Plex remembers for its file. PMS only burns the part's
+    // selected track, whatever a start's URL names, so applying a pick writes the selection at the press: no background
+    // start for that episode's first play (docs/pms-api.md).
     function trackMemoryShow(item) {
         return item && item.type === "episode" && item.grandparentRatingKey ? String(item.grandparentRatingKey) : "";
     }
@@ -5731,7 +6396,7 @@
         }
     }
 
-    function reloadTracks(audioId, subtitleId, cues, subtitleSidecar) {
+    function reloadTracks(audioId, subtitleId, cues) {
         if (!player) { return; }
         var item = playerItem;
         var client = playerClient;
@@ -5742,9 +6407,7 @@
             audioId: audioId !== undefined && String(audioId) !== String(now.audioId) ? audioId : undefined,
             subtitleId: subtitleId !== undefined && String(subtitleId) !== String(now.subtitleId) ? subtitleId : undefined
         });
-        var options = { audioId: audioId, subtitleId: subtitleId, paused: wantsPause(),
-            subtitleSidecar: cues ? (subtitleSidecar === undefined ?
-                playerSettings.subtitleSidecar : !!subtitleSidecar) : false };
+        var options = { audioId: audioId, subtitleId: subtitleId, paused: wantsPause() };
         if (cues) { options.cues = cues; }
         stopPlayer(function () { startPlayer(item, client, position, version, options); });
     }
@@ -5755,10 +6418,10 @@
         setStatus("Loading text subtitles...");
         playerClient.subtitleText(stream.id, stream.codec).then(function (text) {
             if (player !== selectedPlayer || playerClosing || generation !== subtitleSearchGeneration) { return; }
-            reloadTracks(audioId, stream.id, window.VemmSubtitles.parse(text), stream.index === undefined ||
-                stream.index === null);
+            reloadTracks(audioId, stream.id, window.VemmSubtitles.parse(text));
         }).catch(function (error) {
-            if (player === selectedPlayer && !playerClosing && generation === subtitleSearchGeneration) { showPlayerError(error); }
+            // The video is still playing: this costs the subtitle, not the viewing.
+            if (player === selectedPlayer && !playerClosing && generation === subtitleSearchGeneration) { setStatus(errorText(error), true); }
         });
     }
 
@@ -5784,22 +6447,17 @@
         var selectedPlayer = player;
         var ratingKey = playerItem.ratingKey;
         var audioId = player.selection().audioId;
-        var old = document.getElementById("player-menu");
-        if (old) { old.parentNode.removeChild(old); }
-        var menu = element("section", "player-menu player-menu-left");
-        menu.id = "player-menu";
-        menu.plexDismiss = function () { openTracks("subtitle"); };
-        menu.appendChild(element("h2", "", translate("Search for subtitles")));
+        var menu = sidePanel(translate("Search for subtitles"), true, function () { openTracks("subtitle", "search"); });
         var languages = subtitleSearchLanguages(language);
-        var languageButton = button(menu, translate("Language: {language}", { language: language }), function () {
+        var accountLanguages = window.PlexAccountPreferences;
+        var languageButton = valueRow(menu.list, translate("Language"), accountLanguages ? accountLanguages.label(language) : language, function () {
             openSubtitleSearch(languages[(languages.indexOf(language) + 1) % languages.length]);
-        }, true, "settings");
-        var results = group(menu, translate("Results"), "track-group");
+        });
+        var results = group(menu.list, translate("Results"));
         var note = element("p", "help-text", translate("Searching for subtitles..."));
         note.setAttribute("aria-live", "polite");
         results.appendChild(note);
-        screen.appendChild(menu);
-        languageButton.focus();
+        showPanel(menu, languageButton);
         function current() { return player === selectedPlayer && generation === subtitleSearchGeneration; }
         function retry() { openSubtitleSearch(language); }
         playerClient.searchSubtitles(ratingKey, language).then(function (container) {
@@ -5813,7 +6471,7 @@
             hits.forEach(function (hit) {
                 var label = [hit.title || hit.language || translate("Subtitle"), hit.provider,
                     hit.hearingImpaired ? "SDH" : "", hit.forced ? translate("Forced") : ""]
-                    .filter(Boolean).join(" / ");
+                    .filter(Boolean).join(" · ");
                 var choice = button(results, label, function () { downloadSubtitle(hit); }, true);
                 choice.setAttribute("aria-label", label + ", " + translate("score {score}", { score: hit.score }));
             });
@@ -5854,148 +6512,167 @@
         }
     }
 
-    // Marks a track-menu row: opens a sub-list (hasSub, shows the › indicator) and/or sits inside one (inside, indented).
-    function subList(control, inside, nested) {
-        if (!nested) { control.className += " menu-has-sub"; }
-        if (inside || nested) { control.className += " menu-sub-item"; }
-        return control;
+    // The languages this viewer most likely wants, as two-letter codes: their Plex account's, then the app's.
+    function viewerLanguages(type) {
+        var account = readAccountAudioCache() || {};
+        return [type === "audio" ? account.audioLanguage : account.subtitleLanguage, preferences.language]
+            .map(window.VemmSubtitleSearch.twoLetter);
     }
-
-    function openTracks(type, language) {
-        if (!player) { return; }
-        type = type || "subtitle";
-        cancelHudTimer();
-        var old = document.getElementById("player-menu");
-        if (old && old.parentNode) { old.parentNode.removeChild(old); }
-        var menu = element("section", "player-menu player-menu-left");
-        menu.id = "player-menu";
-        // Back from a language's tracks returns to the languages; from the languages it closes.
-        menu.plexDismiss = function () { if (language) { openTracks(type); } else { closeTrackMenu(type); } };
-        menu.appendChild(element("h2", "", translate(type === "audio" ? "Audio" : "Subtitles")));
-        var current = player.selection();
-        var reload = reloadTracks;
-        var streams = (player.part().Stream || []).filter(function (stream) {
+    function playerTracks(type) {
+        return (player.part().Stream || []).filter(function (stream) {
             return stream.streamType === (type === "audio" ? 2 : 3);
         });
-        var languageNames = [];
-        streams.forEach(function (stream) {
-            var name = stream.language || stream.languageTag || stream.languageCode || translate("Other languages");
-            if (languageNames.indexOf(name) === -1) { languageNames.push(name); }
-        });
-        var preferred = languageNames.filter(function (name) {
-            var stream = streams.filter(function (entry) {
-                return (entry.language || entry.languageTag || entry.languageCode) === name;
-            })[0];
-            var code = stream && (stream.languageCode || stream.languageTag || "");
-            return code.toLowerCase().slice(0, 2) === preferences.language.slice(0, 2);
-        })[0];
-        if (language === "__other_languages") {
-            var otherOptions = languageNames.filter(function (name) { return name !== preferred; });
-            otherOptions.forEach(function (name) {
-                subList(button(menu, name, function () { openTracks(type, name); }, false, "language"), true);
-            });
-        } else if (!language) {
-            if (preferred) {
-                subList(button(menu, preferred, function () { openTracks(type, preferred); }, false, "language"));
-            } else {
-                languageNames.forEach(function (name) {
-                    subList(button(menu, name, function () { openTracks(type, name); }, false, "language"));
-                });
-            }
-        } else {
-            var matching = streams.filter(function (stream) {
-                return (stream.language || stream.languageTag || stream.languageCode || translate("Other languages")) === language;
-            });
-            matching.forEach(function (stream) {
-                var label = stream.displayTitle || stream.language || stream.codec || String(stream.id);
-                var choice = button(menu, label, function () {
-                    if (type === "audio") { reload(stream.id, current.subtitleId, externalCues); }
-                    else { reload(current.audioId, stream.id); }
-                });
-                subList(choice, false, true);
-                choice.setAttribute("aria-pressed", String(type === "audio" ?
-                    String(current.audioId) === String(stream.id) :
-                    !externalCues && String(current.subtitleId) === String(stream.id)));
-                if (type === "subtitle" && ["srt", "subrip", "webvtt"].indexOf(stream.codec) !== -1) {
-                    subList(button(menu, translate("Text overlay / {track}", { track: label }), function () {
-                        useTextOverlay(stream, current.audioId);
-                    }), false, true);
-                }
-            });
+    }
+
+    // One flat list, the likely choices first, so any track is one press after scrolling: the current track, Off, its
+    // and the viewer's languages, then the others. What is not a track stays in view below the list and, because menus
+    // wrap, one press Up from the first row. Back closes.
+    function openTracks(type, focus) {
+        if (!player) { return; }
+        type = type || "subtitle";
+        var subtitles = type === "subtitle";
+        var menu = sidePanel(translate(subtitles ? "Subtitles" : "Audio"), true, function () { closeTrackMenu(type); });
+        var list = menu.list;
+        var current = player.selection();
+        var chosenId = subtitles ? current.subtitleId : current.audioId;
+        var streams = playerTracks(type);
+        var labels = window.VemmTrackMenu.labels(streams, translate("Forced"));
+        var arranged = window.VemmTrackMenu.arrange(streams, chosenId, viewerLanguages(type), window.VemmSubtitleSearch.twoLetter);
+        var overlay = subtitles && externalCues;
+        var reload = reloadTracks;
+        // A forced track can be a handful of lines in an hour: "on", but looking broken. Say so if there is a fuller one.
+        var showing = subtitles && streams.filter(function (stream) { return String(stream.id) === String(current.subtitleId); })[0];
+        if (showing && window.VemmTrackMemory.kind(showing) === "forced" && window.VemmTrackMemory.fullTrack(showing, streams)) {
+            list.appendChild(element("p", "help-text subtitle-partial-note", translate("{track} leaves most of the dialogue out. Pick another track to read all of it.",
+                { track: labels[streams.indexOf(showing)] })));
         }
-        if (type === "subtitle") {
-            if (playerItem.type === "movie" || playerItem.type === "episode") {
-                button(menu, "Search for subtitles", function () {
-                    openSubtitleSearch(window.VemmSubtitleSearch.defaultLanguage(player.part(), preferences.language));
-                });
-            }
-            if (externalCues) { button(menu, "Subtitle timing", openSubtitleTiming); }
-            var appearance = group(menu, translate("Text overlay appearance"), "track-group");
-            appearance.appendChild(element("p", "help-text", translate("These settings apply only to the app-rendered SRT/WebVTT text overlay, not device-native or burned subtitles.")));
-            function cycleAppearance(title, preferenceKey, values, labelForValue) {
-                button(appearance, translate("{setting}: {value}", {
-                    setting: translate(title), value: translate(labelForValue(preferences[preferenceKey]))
-                }), function () {
-                    var index = values.indexOf(preferences[preferenceKey]);
-                    preferences[preferenceKey] = values[(index + 1) % values.length];
-                    if (savePreferences()) {
-                        refreshSubtitleAppearance();
-                        openTracks("subtitle");
-                    }
-                }, false, "settings");
-            }
-            cycleAppearance("Text size", "subtitleSize", ["small", "medium", "large", "extra_large"],
-                function (value) { return { small: "Small", medium: "Medium", large: "Large", extra_large: "Extra large" }[value]; });
-            cycleAppearance("Text position", "subtitlePosition", ["low", "middle", "high"], function (value) { return value; });
-            cycleAppearance("Text color", "subtitleColor", SUBTITLE_COLORS, colorName);
-            cycleAppearance("Text background", "subtitleBackground", ["off", "on"], backgroundName);
+        function trackRow(parent, stream) {
+            var chosen = !overlay && String(chosenId) === String(stream.id);
+            button(parent, labels[streams.indexOf(stream)], function () {
+                if (chosen) { closeTrackMenu(type); }
+                else if (subtitles) { reload(current.audioId, stream.id); }
+                else { reload(stream.id, current.subtitleId, externalCues); }
+            }, true).setAttribute("aria-pressed", String(chosen));
         }
-        button(menu, "Subtitles off", function () { reload(current.audioId, 0); })
-            .setAttribute("aria-pressed", String(!current.subtitleId && !externalCues));
-        var other = languageNames.filter(function (name) { return name !== preferred; });
-        if (!language && preferred && other.length) {
-            subList(button(menu, "Other languages", function () { openTracks(type, "__other_languages"); }, false, "language"));
+        var now = !overlay && arranged.first[0] && String(chosenId) === String(arranged.first[0].id);
+        if (overlay && arranged.first[0]) {
+            button(list, labels[streams.indexOf(arranged.first[0])] + " · " + translate("Text overlay"), function () { closeTrackMenu(type); }, true)
+                .setAttribute("aria-pressed", "true");
+        }
+        if (now) { trackRow(list, arranged.first.shift()); }
+        if (subtitles) {
+            var off = !chosenId && !overlay;
+            button(list, "Subtitles off", function () {
+                if (off) { closeTrackMenu(type); } else { reload(current.audioId, 0); }
+            }).setAttribute("aria-pressed", String(off));
+        }
+        (subtitles ? window.VemmTrackMemory.ordered(arranged.first) : arranged.first).forEach(function (stream) { trackRow(list, stream); });
+        if (arranged.others.length) {
+            var others = group(list, translate("Other languages"));
+            arranged.others.forEach(function (stream) { trackRow(others, stream); });
+        }
+        if (subtitles && !streams.length) {
+            list.appendChild(element("p", "help-text", translate("No subtitle tracks are available.")));
         }
         var rememberedShow = trackMemoryShow(playerItem);
         if (rememberedShow && window.VemmTrackMemory && window.VemmTrackMemory.recall(window.localStorage, rememberedShow)) {
-            button(menu, "Reset to default tracks", function () {
+            button(list, "Reset to default tracks", function () {
                 window.VemmTrackMemory.forget(window.localStorage, rememberedShow);
                 setStatus("Other episodes of this show use the default tracks.");
-                openTracks(type, language);
+                openTracks(type);
             });
-        }
-        if (!language && type === "subtitle" && !streams.length) {
-            menu.appendChild(element("p", "help-text", translate("No subtitle tracks are available.")));
         }
         var nativeTracks = element("div", "native-tracks");
         nativeTracks.hidden = true;
         try {
             player.tracks().forEach(function (track) {
                 if (track.type !== "AUDIO" && track.type !== "TEXT") { return; }
-                subList(button(nativeTracks, translate("Samsung {type} track {number}", { type: translate(track.type), number: track.index }), function () {
+                button(nativeTracks, translate("Samsung {type} track {number}", { type: translate(track.type), number: track.index }), function () {
                     try {
                         player.selectTrack(track.type, track.index);
                         if (track.type === "TEXT") { player.subtitles(true); }
                         setStatus("Samsung track selected. Verify the output on this model.");
                     } catch (error) { showPlayerError(error); }
-                }), false, true);
+                });
             });
-        } catch (error) { menu.appendChild(element("p", "inline-error", errorText(error))); }
+        } catch (error) { list.appendChild(element("p", "inline-error", errorText(error))); }
         if (nativeTracks.querySelectorAll("button").length) {
-            subList(button(menu, "Device tracks", function () {
+            opens(button(list, "Device tracks", function () {
                 nativeTracks.hidden = !nativeTracks.hidden;
-            }, false, "settings"));
-            menu.appendChild(nativeTracks);
+            }));
+            list.appendChild(nativeTracks);
         }
-        screen.appendChild(menu);
-        var control = menu.querySelectorAll("button")[0];
-        if (control) { control.focus(); }
+        var entries = {};
+        if (subtitles) {
+            var footer = group(menu, "", "menu-footer");
+            if (externalCues) { button(footer, "Subtitle timing", openSubtitleTiming); }
+            if (playerItem.type === "movie" || playerItem.type === "episode") {
+                entries.search = opens(button(footer, "Search for subtitles", function () {
+                    openSubtitleSearch(window.VemmSubtitleSearch.defaultLanguage(player.part(), preferences.language));
+                }));
+            }
+            entries.appearance = opens(button(footer, "Appearance", openSubtitleLooks));
+        }
+        showPanel(menu, entries[focus] || list.querySelector("button"));
+    }
+
+    // How the text overlay looks, and which track it shows. Back returns to Subtitles.
+    function openSubtitleLooks() {
+        if (!player) { return; }
+        var menu = sidePanel(translate("Text overlay appearance"), true, function () { openTracks("subtitle", "appearance"); });
+        var streams = playerTracks("subtitle");
+        var labels = window.VemmTrackMenu.labels(streams, translate("Forced"));
+        var showing = externalCues && streams.filter(function (stream) {
+            return String(stream.id) === String(player.selection().subtitleId);
+        })[0];
+        if (streams.some(window.VemmSubtitles.drawable)) {
+            opens(valueRow(menu.list, translate("Text overlay"), showing ? labels[streams.indexOf(showing)] : translate("Off"), function () {
+                openTextOverlayChoices();
+            }));
+        }
+        subtitleLookRows(menu.list, refreshSubtitleAppearance);
+        menu.list.appendChild(element("p", "help-text", translate("These settings apply only to the app-rendered SRT/WebVTT text overlay, not device-native or burned subtitles.")));
+        showPanel(menu, menu.list.querySelector("button"));
+    }
+
+    // Text subtitles the app draws itself, in the looks above, instead of the server or the TV.
+    function openTextOverlayChoices() {
+        if (!player) { return; }
+        var menu = sidePanel(translate("Text overlay"), true, openSubtitleLooks);
+        var current = player.selection();
+        var streams = playerTracks("subtitle");
+        var labels = window.VemmTrackMenu.labels(streams, translate("Forced"));
+        streams.forEach(function (stream, at) {
+            if (!window.VemmSubtitles.drawable(stream)) { return; }
+            var chosen = !!externalCues && String(current.subtitleId) === String(stream.id);
+            button(menu.list, labels[at], function () {
+                if (chosen) { openSubtitleLooks(); } else { useTextOverlay(stream, current.audioId); }
+            }, true).setAttribute("aria-pressed", String(chosen));
+        });
+        showPanel(menu);
+    }
+
+    // What the playing file offers: a saved quality at or above what it needs asks for the same as its top choice.
+    function playerQuality() {
+        var source = (playerItem.Media || [])[playerSettings.mediaIndex] || {};
+        var direct = window.VemmPlayback && window.VemmPlayback.plan(playerItem, {
+            mediaIndex: playerSettings.mediaIndex, quality: "original", profile: playerSettings.profile,
+            directPlay: preferences.directPlay,
+            overlaySubtitle: playerSettings.overlaySubtitle, audioId: playerSettings.audioId,
+            subtitleId: playerSettings.subtitleId }).direct;
+        var top = qualityTop(source, direct);
+        return { source: source, top: top, chosen: qualityFor(playerSettings.quality, top) };
     }
 
     function openQuality() {
         if (!player) { return; }
-        var menu = playerSubmenu("Quality and media version", "quality");
-        menu.appendChild(element("p", "help-text", translate("Original source") + ": " + qualityLabel(player.quality().source)));
+        var menu = playerSubmenu("Quality and version", "quality");
+        var list = menu.list;
+        list.appendChild(element("p", "help-text", translate("Original source") + ": " + qualityLabel(player.quality().source)));
+        var fit = playerQuality();
+        var source = fit.source;
+        var top = fit.top;
+        var chosen = fit.chosen;
         function change(quality, version) {
             if (quality === chosen && version === playerSettings.mediaIndex) { openPlaybackOptions("quality"); return; }
             var item = playerItem;
@@ -6007,27 +6684,18 @@
             stopPlayer(function () { startPlayer(item, client, position, version, tracks); });
         }
         var current = player.quality();
-        var originalDirect = window.VemmPlayback && window.VemmPlayback.plan(playerItem, {
-            mediaIndex: playerSettings.mediaIndex, quality: "original", profile: playerSettings.profile,
-            directPlay: preferences.directPlay,
-            overlaySubtitle: playerSettings.overlaySubtitle, audioId: playerSettings.audioId,
-            subtitleId: playerSettings.subtitleId }).direct;
-        menu.appendChild(element("p", "help-text", translate("Now playing") + ": " + modeName(current.mode) + " · " +
+        list.appendChild(element("p", "help-text", translate("Now playing") + ": " + modeName(current.mode) + " · " +
             qualityLabel(current.mode === "direct" ? current.source : current.stream)));
         if (preferences.directPlay === "force") {
-            menu.appendChild(element("p", "help-text",
+            list.appendChild(element("p", "help-text",
                 translate("Direct play is set to Force in Settings, so the original file is always used.")));
         }
         var speed = recentSpeed();
-        var source = (playerItem.Media || [])[playerSettings.mediaIndex] || {};
-        // A saved quality at or above what this file needs asks for the same as its top choice.
-        var top = qualityTop(source, originalDirect);
-        var chosen = qualityFor(playerSettings.quality, top);
-        qualityGroups(chosen, source, top).forEach(function (resolution) {
-            if (preferences.directPlay === "force" && resolution.lines) { return; }
-            var list = group(menu, resolution.title, "menu-group");
-            resolution.qualities.forEach(function (quality) {
-                var row = button(list, qualityChoiceName(quality, source, top),
+        qualityGroups(chosen, source, top).forEach(function (kind) {
+            if (preferences.directPlay === "force" && kind.converted) { return; }
+            var rows = group(list, kind.title);
+            kind.qualities.forEach(function (quality) {
+                var row = button(rows, qualityChoiceName(quality, source, top),
                     function () { change(quality, playerSettings.mediaIndex); }, true);
                 if (window.VemmPlayback.warns(quality === "original" ? (isFinite(top) ? top : 0) : qualityKbps(quality), speed)) {
                     markSlow(row);
@@ -6037,13 +6705,12 @@
         });
         (playerItem.Media || []).forEach(function (media, version) {
             if (playerItem.Media.length < 2) { return; }
-            button(menu, translate("Version {number} / {quality}", { number: version + 1, quality: qualityLabel(media) }) +
+            button(list, translate("Version {number} / {quality}", { number: version + 1, quality: qualityLabel(media) }) +
                     (Number(media.proxyType) === 42 ? " · " + translate("Optimized version") : ""),
-                function () { change(preferences.quality, version); })
+                function () { change(preferences.quality, version); }, true)
                 .setAttribute("aria-pressed", String(playerSettings.mediaIndex === version));
         });
-        screen.appendChild(menu);
-        (menu.querySelector('[aria-pressed="true"]') || menu.querySelector("button")).focus();
+        showPanel(menu);
     }
 
     function finishEpisode(startNow, suppliedSuccessor) {
@@ -6053,7 +6720,10 @@
         var queue = playerSettings && playerSettings.playQueue;
         function nextQueue(next) { return queue && queue.playlist ? window.VemmPlaylists.advance(queue, next) : null; }
         stopPlayer(function () {
+            // This page only waits for the next item.
+            upNextPage = true;
             renderDetail(item, client);
+            upNextPage = false;
             var generation = viewGeneration;
             var successor = suppliedSuccessor || queueSuccessor(queue);
             (successor || queue && queue.playlist ? Promise.resolve(successor) : client.nextEpisode(item)).then(function (next) {
@@ -6094,39 +6764,45 @@
     }
 
     // values and current may be functions, so the page can be rebuilt after the speed changes.
-    // extra(menu, notes) adds controls after the options and info text below the card.
+    // extra(list, notes) adds controls after the options and info text below the card. Back is the remote's job.
     function settingsChoices(title, values, current, choose, extra) {
         retryView = null;
         visit(function renderChoices() {
             viewGeneration += 1;
-            clear(screen);
-            page(translate(title), "settings");
-            var menu = element("section", "settings-menu");
-            screen.appendChild(menu);
-            var notes = element("div", "settings-notes");
-            var holder = menu;
+            var body = settingsPage(translate(title));
+            var holder = body.list;
             var heading;
             var selected = typeof current === "function" ? current() : current;
+            var chosenRow = null;
             (typeof values === "function" ? values() : values).forEach(function (value) {
                 // A value may carry a group heading; each group is one column under its title.
                 if (value.group !== undefined && value.group !== heading) {
                     heading = value.group;
-                    holder = group(menu, heading, "settings-group");
+                    holder = group(body.list, heading, "settings-group");
                 }
-                var row = button(holder, value.label, function () { choose(value.value); }, value.literal);
-                row.setAttribute("aria-pressed", String(selected === value.value));
+                function pick() { choose(value.value); }
+                var row = value.detail ? opens(valueRow(holder, value.label, value.detail, pick)) :
+                    button(holder, value.label, pick, value.literal, "none");
+                // A value with on is one of several independent switches; otherwise one value is the current one.
+                if (value.on !== undefined) {
+                    row.className += " menu-switch";
+                    row.setAttribute("aria-pressed", String(value.on));
+                } else if (!value.detail) {
+                    row.setAttribute("aria-pressed", String(selected === value.value));
+                    if (selected === value.value) { chosenRow = row; }
+                }
                 if (value.warn) { markSlow(row); }
                 if (value.swatch) {
                     row.className += " swatch-choice";
                     row.setAttribute("data-color", value.swatch);
                 }
             });
-            if (extra) { extra(menu, notes); }
-            button(menu, "Back", backView);
-            screen.appendChild(notes);
+            if (extra) { extra(body.list, body.notes); }
             restoreView = renderChoices;
             setStatus("");
+            var returning = pendingRestore;
             focusFirst();
+            if (!returning && chosenRow) { chosenRow.focus(); }
         });
     }
 
@@ -6134,7 +6810,7 @@
     function artworkOptions(parent, notes) {
         var megabyte = 1024 * 1024;
         function size(bytes) { return Math.round(bytes / megabyte * 10) / 10 + " MB"; }
-        button(parent, translate("Artwork storage limit: {size} MB", { size: preferences.artworkLimitMb }), function () {
+        opens(valueRow(parent, translate("Artwork storage limit"), preferences.artworkLimitMb + " MB", function () {
             readDeviceStats(function (stats) {
                 var choices = window.VemmPreferences.artworkLimitChoices(stats ? stats.quota : null, preferences.artworkLimitMb);
                 settingsChoices("Artwork storage limit", choices.map(function (mb) {
@@ -6150,27 +6826,13 @@
                     backView();
                 });
             });
-        }, true, "settings");
-        var library = button(parent, translate("Save library artwork too: {state}", {
-            state: translate(preferences.saveLibraryArtwork ? "On" : "Off")
-        }), function () {
-            var previous = preferences.saveLibraryArtwork;
-            preferences.saveLibraryArtwork = !previous;
-            if (!savePreferences()) { preferences.saveLibraryArtwork = previous; return; }
+        }));
+        preferenceSwitch(parent, "Save library artwork too", "saveLibraryArtwork", function () {
             if (!preferences.saveLibraryArtwork && artworkStore) { artworkStore.removeCategory("library"); }
-            openSettings(settingsSection);
-        }, true, "settings");
-        library.setAttribute("aria-pressed", String(preferences.saveLibraryArtwork));
-        var preload = button(parent, translate("Load saved artwork at startup: {state}", {
-            state: translate(preferences.preloadArtwork ? "On" : "Off")
-        }), function () {
-            var previous = preferences.preloadArtwork;
-            preferences.preloadArtwork = !previous;
-            if (!savePreferences()) { preferences.preloadArtwork = previous; return; }
+        });
+        preferenceSwitch(parent, "Load saved artwork at startup", "preloadArtwork", function () {
             if (preferences.preloadArtwork) { preloadArtwork(); } else { dropSavedArtwork(); }
-            openSettings(settingsSection);
-        }, true, "settings");
-        preload.setAttribute("aria-pressed", String(preferences.preloadArtwork));
+        });
         var used = element("p", "help-text");
         notes.appendChild(used);
         if (artworkStore) {
@@ -6236,7 +6898,8 @@
         var generation = viewGeneration;
         function refresh() {
             if (generation !== viewGeneration || !section.parentNode) { return; }
-            var focused = section.contains(document.activeElement);
+            // Nothing could hold focus while the page was still loading.
+            var focused = section.contains(document.activeElement) || !screen.contains(document.activeElement);
             renderAccountAudio(section, notes, refresh);
             if (focused && !section.contains(document.activeElement)) {
                 var first = section.querySelector("button");
@@ -6254,7 +6917,6 @@
         var api = window.PlexAccountPreferences;
         clear(section);
         clear(notes);
-        notes.appendChild(element("p", "help-text", translate("Language preferences synced with your Plex account.")));
         if (accountAudio.state === "loading") {
             notes.appendChild(element("p", "help-text", translate("Loading your Plex account preferences…")));
             return;
@@ -6273,7 +6935,7 @@
             }));
         }
         function row(title, label, open) {
-            button(section, translate("{setting}: {value}", { setting: translate(title), value: label }), open, true, "settings");
+            opens(valueRow(section, translate(title), label, open));
         }
         row("Preferred audio language", value.audioLanguage ? api.label(value.audioLanguage) : translate("Original"), function () {
             settingsChoices("Preferred audio language", languageOptions("Original"),
@@ -6335,18 +6997,19 @@
 
     var settingsSection = "";
 
-    // Each section builds its controls into the page menu; the Settings page lists the available ones.
+    // Each section builds its controls into the page's list; the Settings page lists the available ones. A section with
+    // just one setting (open and value instead of build) has no page of its own: its row goes straight to the choices.
     function settingsSections() {
         var sections = [{ title: "Playback", build: function (menu, notes) {
             var playbackSettings = group(menu, "", "settings-group");
-            button(playbackSettings, translate("Quality: {quality}", { quality: qualityName(preferences.quality) }), function () {
+            opens(valueRow(playbackSettings, translate("Quality"), qualityName(preferences.quality), function () {
                 // Recomputed on every render, so a recheck or a new choice shows up when coming back.
                 function choices() {
                     var speed = recentSpeed();
                     var list = [];
-                    qualityGroups(preferences.quality).forEach(function (resolution) {
-                        resolution.qualities.forEach(function (quality) {
-                            list.push({ value: quality, label: qualityName(quality), group: resolution.title,
+                    qualityGroups(preferences.quality).forEach(function (kind) {
+                        kind.qualities.forEach(function (quality) {
+                            list.push({ value: quality, label: qualityName(quality), literal: true, group: kind.title,
                                 warn: quality !== "original" && window.VemmPlayback.warns(qualityKbps(quality), speed) });
                         });
                     });
@@ -6356,7 +7019,7 @@
                     preferences.quality = quality;
                     if (savePreferences()) { backView(); }
                 }, function (menu, notes) {
-                    button(menu, "Recheck speed", openSpeedTest, false, "server");
+                    opens(button(menu, "Recheck speed", openSpeedTest));
                     var speed = recentSpeed();
                     if (!speed) { return; }
                     var mbps = Math.round(speed.mbps * 10) / 10;
@@ -6365,8 +7028,8 @@
                         translate("Recent speed: {mbps} Mbps (average of {count} tests)", { mbps: mbps, count: speed.count })));
                     notes.appendChild(element("p", "help-text", translate("Options with a warning icon may buffer on your connection.")));
                 });
-            }, false, "settings");
-            button(playbackSettings, "Test connection speed", openSpeedTest, false, "server");
+            }));
+            opens(button(playbackSettings, "Test connection speed", openSpeedTest));
             preferenceChoice(playbackSettings, "Minimum buffer", "minBuffer", bufferChoices(), bufferName);
             bufferWarning(null, notes);
             preferenceChoice(playbackSettings, "Skip interval", "skipInterval", [5, 10, 15, 30, 60],
@@ -6381,53 +7044,36 @@
                 });
             preferenceChoice(playbackSettings, "Direct play", "directPlay", ["auto", "force", "off"],
                 function (value) { return { auto: "Auto", force: "Force", off: "Off" }[value]; });
-            button(playbackSettings, translate("Continue Watching: {state}", {
-                state: translate(preferences.continueAction === "play" ? "Play" : "Open details")
-            }), function () {
+            function continueName() { return translate(preferences.continueAction === "play" ? "Play" : "Open details"); }
+            var continueRow = valueRow(playbackSettings, translate("Continue Watching"), continueName(), function () {
                 preferences.continueAction = preferences.continueAction === "play" ? "details" : "play";
-                if (savePreferences()) { openSettings(settingsSection); }
-            }, false, "play");
+                if (savePreferences()) { setRowValue(continueRow, continueName()); }
+            });
         } }];
         if (accountClient && window.PlexAccountPreferences) {
             sections.push({ title: "Audio & subtitles", build: accountAudioGroup });
         }
         sections.push({ title: "Text overlay appearance", build: function (menu, notes) {
             var subtitleSettings = group(menu, "", "settings-group");
-            var previewToggle = button(subtitleSettings, translate("Preview: {state}", {
-                state: translate(subtitlePreview ? "On" : "Off")
-            }), function () {
+            var previewToggle = switchRow(subtitleSettings, translate("Preview"), subtitlePreview, function () {
                 subtitlePreview = !subtitlePreview;
-                previewToggle.setAttribute("aria-pressed", String(subtitlePreview));
-                previewToggle.textContent = translate("Preview: {state}", { state: translate(subtitlePreview ? "On" : "Off") });
+                setSwitch(previewToggle, subtitlePreview);
                 syncSubtitlePreview();
                 notes.hidden = subtitlePreview;
-            }, false, "subtitles");
-            previewToggle.setAttribute("aria-pressed", String(subtitlePreview));
+            });
             syncSubtitlePreview();
             notes.hidden = subtitlePreview;
             notes.appendChild(element("p", "help-text", translate("These settings apply only to the app-rendered SRT/WebVTT text overlay, not device-native or burned subtitles.")));
-            preferenceChoice(subtitleSettings, "Text size", "subtitleSize", ["small", "medium", "large", "extra_large"],
-                function (value) { return { small: "Small", medium: "Medium", large: "Large", extra_large: "Extra large" }[value]; });
-            preferenceChoice(subtitleSettings, "Text position", "subtitlePosition", ["low", "middle", "high"], function (value) { return value; });
-            preferenceChoice(subtitleSettings, "Text color", "subtitleColor", SUBTITLE_COLORS, colorName);
-            preferenceChoice(subtitleSettings, "Text background", "subtitleBackground", ["off", "on"], backgroundName);
+            subtitleLookRows(subtitleSettings, syncSubtitlePreview);
         } });
         if (currentClient && currentServerId) {
             sections.push({ title: "Libraries", build: function (menu) {
                 var librarySettings = group(menu, "", "settings-group");
-                button(librarySettings, "Favorite libraries", function () { visit(function () { openFavorites(false); }); });
-                var advanceToggle = button(librarySettings, translate("Auto-advance featured titles: {state}", {
-                    state: translate(preferences.autoAdvanceFeatures ? "On" : "Off")
-                }), function () {
-                    var previous = preferences.autoAdvanceFeatures;
-                    preferences.autoAdvanceFeatures = !previous;
-                    if (!savePreferences()) { preferences.autoAdvanceFeatures = previous; return; }
-                    openSettings(settingsSection);
-                }, false, "settings");
-                advanceToggle.setAttribute("aria-pressed", String(preferences.autoAdvanceFeatures));
-                button(librarySettings, translate("Ratings shown: {count} of {total}", {
+                opens(button(librarySettings, "Favorite libraries", function () { visit(function () { openFavorites(false); }); }));
+                preferenceSwitch(librarySettings, "Auto-advance featured titles", "autoAdvanceFeatures");
+                opens(valueRow(librarySettings, translate("Ratings shown"), translate("{count} of {total}", {
                     count: preferences.ratingSources.length, total: window.VemmPreferences.ratingSources.length
-                }), openRatingSourceChoices, false, "settings");
+                }), openRatingSourceChoices));
                 if (isServerOwner()) { libraryRatingSourceEntry(librarySettings, currentClient); }
             } });
         }
@@ -6435,34 +7081,38 @@
             sections.push({ title: "Home", build: function (menu, notes) {
                 var home = group(menu, "", "settings-group");
                 if (accountClient) {
-                    var autoOpen = button(home, translate("Open last profile on launch: {state}", {
-                        state: translate(preferences.autoOpenProfile ? "On" : "Off")
-                    }), function () {
-                        var previous = preferences.autoOpenProfile;
-                        preferences.autoOpenProfile = !previous;
-                        if (!savePreferences()) { preferences.autoOpenProfile = previous; return; }
-                        openSettings(settingsSection);
-                    }, true, "profile");
-                    autoOpen.setAttribute("aria-pressed", String(preferences.autoOpenProfile));
+                    preferenceSwitch(home, "Open last profile on launch", "autoOpenProfile");
                     notes.appendChild(element("p", "help-text", translate(
                         "Skips Who is watching? and opens Home with the profile used last. A profile with a PIN still asks for it.")));
                 }
                 if (currentClient && currentServerId && window.VemmHomeRows) {
-                    button(home, "Home rows", function () { visit(openHomeRows); }, false, "television");
+                    opens(button(home, "Home rows", function () { visit(openHomeRows); }));
                 }
             } });
         }
-        sections.push({ title: "Language", build: function (menu) {
-            var languages = group(menu, "", "settings-group");
-            var names = { en: "English", es: "Español", be: "Беларуская" };
-            button(languages, translate("Language") + ": " + names[preferences.language], function () {
-                settingsChoices("Language", ["en", "es", "be"].map(function (language) {
-                    return { value: language, label: names[language] };
-                }), preferences.language, function (language) {
-                    preferences.language = language;
-                    if (savePreferences()) { backView(); }
-                });
-            }, false, "language");
+        if (window.VemmIptv) {
+            sections.push({ title: "Live TV", build: function (menu, notes) {
+                var tv = group(menu, "", "settings-group");
+                var saved = iptvLink();
+                opens(valueRow(tv, translate("Playlist link"), translate(saved ? "Set" : "Not set"), function () { visit(openIptvLink); }));
+                if (saved) {
+                    button(tv, "Remove playlist link", function () {
+                        window.VemmIptv.forget(window.localStorage);
+                        iptvLoaded = null;
+                        openSettings(settingsSection);
+                    });
+                }
+                notes.appendChild(element("p", "help-text", translate("Paste an M3U playlist link from your IPTV provider to watch its channels. It is kept only on this TV and is never sent to Plex. Many providers use plain http links.")));
+            } });
+        }
+        var names = { en: "English", es: "Español", be: "Беларуская" };
+        sections.push({ title: "Language", value: names[preferences.language], open: function () {
+            settingsChoices("Language", ["en", "es", "be"].map(function (language) {
+                return { value: language, label: names[language] };
+            }), preferences.language, function (language) {
+                preferences.language = language;
+                if (savePreferences()) { backView(); }
+            });
         } });
         if (window.VemmTheme) {
             sections.push({ title: "Appearance", build: function (menu, notes) {
@@ -6481,17 +7131,11 @@
         if (accountToken || currentClient) {
             sections.push({ title: "Graphics", build: function (menu, notes) {
                 var graphicsSettings = group(menu, "", "settings-group");
-                var graphicsToggle = button(graphicsSettings, translate("New graphics enhancements: {state}", {
-                    state: translate(preferences.enhancedGraphics ? "On" : "Off")
-                }), function () {
-                    var previous = preferences.enhancedGraphics;
-                    preferences.enhancedGraphics = !previous;
-                    if (!savePreferences()) { preferences.enhancedGraphics = previous; return; }
+                preferenceSwitch(graphicsSettings, "New graphics enhancements", "enhancedGraphics", function () {
                     graphicsFailure = false;
                     if (graphics) { graphics.setEnabled(preferences.enhancedGraphics && !!currentClient); }
                     openSettings(settingsSection);
-                }, false, "settings");
-                graphicsToggle.setAttribute("aria-pressed", String(preferences.enhancedGraphics));
+                });
                 notes.appendChild(element("p", "help-text", translate(
                     "Optional WebGL artwork rendering. Off by default. Existing Home acceleration and AVPlay stay enabled. Unsupported features automatically use the existing renderer.")));
                 notes.appendChild(element("p", "help-text", translate(graphicsFailure ?
@@ -6503,29 +7147,23 @@
         }
         sections.push({ title: "Performance", build: function (menu, notes) {
             var performance = group(menu, "", "settings-group");
-            var artworkToggle = button(performance, translate("Save Home artwork on this TV: {state}", {
-                state: translate(preferences.saveHomeArtwork ? "On" : "Off")
-            }), function () {
-                var previous = preferences.saveHomeArtwork;
-                preferences.saveHomeArtwork = !previous;
-                if (!savePreferences()) { preferences.saveHomeArtwork = previous; return; }
+            preferenceSwitch(performance, "Save Home artwork on this TV", "saveHomeArtwork", function () {
                 if (!preferences.saveHomeArtwork) {
                     dropSavedArtwork();
                     if (artworkStore) { artworkStore.clear(); }
                 }
                 openSettings(settingsSection);
-            }, false, "settings");
-            artworkToggle.setAttribute("aria-pressed", String(preferences.saveHomeArtwork));
+            });
             if (preferences.saveHomeArtwork) { artworkOptions(performance, notes); }
         } });
         if (devMode()) {
             sections.push({ title: "Developer", build: function (menu, notes) {
                 var tools = group(menu, "", "settings-group");
-                button(tools, "Error log", function () { visit(openErrorLog); }, false, "info");
+                opens(button(tools, "Error log", function () { visit(openErrorLog); }));
                 button(tools, "Turn off developer mode", function () {
                     window.VemmDevMode.setEnabled(window.localStorage, false);
                     openSettings("");
-                }, false, "settings");
+                });
                 notes.appendChild(element("p", "help-text", translate("Technical readouts for diagnosing problems. Stats for nerds also shows playback decisions and buffering while this is on.")));
             } });
         }
@@ -6536,10 +7174,7 @@
                 var savedAccount = "";
                 try { savedAccount = window.VemmSession.load(window.localStorage); }
                 catch (error) { storageWarning = errorText(error); }
-                var savedSignIn = savedAccount === accountToken;
-                var savedLabel = translate("Stay signed in on this TV") + ": " +
-                    translate(savedSignIn ? "On" : "Off");
-                var saveSignIn = button(privacy, savedLabel, function () {
+                var saveSignIn = switchRow(privacy, translate("Stay signed in on this TV"), savedAccount === accountToken, function () {
                     var shouldSave = saveSignIn.getAttribute("aria-pressed") !== "true";
                     try {
                         if (shouldSave) {
@@ -6549,15 +7184,12 @@
                             window.VemmSession.forget(window.localStorage);
                             window.VemmSession.setEnabled(window.localStorage, false);
                         }
-                        saveSignIn.setAttribute("aria-pressed", String(shouldSave));
-                        saveSignIn.textContent = translate("Stay signed in on this TV") + ": " +
-                            translate(shouldSave ? "On" : "Off");
+                        setSwitch(saveSignIn, shouldSave);
                         setStatus("");
                     } catch (error) {
                         setStatus("Could not update saved sign-in. Check app storage permissions.", true);
                     }
-                }, true);
-                saveSignIn.setAttribute("aria-pressed", String(savedSignIn));
+                });
                 notes.appendChild(element("p", "help-text",
                     translate("Saved Plex credentials are stored unencrypted on this TV.")));
             }
@@ -6566,6 +7198,7 @@
                     window.VemmPreferences.reset(window.localStorage);
                     if (window.VemmFavorites) { window.VemmFavorites.reset(window.localStorage); }
                     if (window.VemmRecents) { window.VemmRecents.reset(window.localStorage); }
+                    if (window.VemmIptv) { window.VemmIptv.forget(window.localStorage); iptvLoaded = null; }
                     forgetRememberedHome();
                     var storedArtwork = preferences.saveHomeArtwork;
                     preferences = window.VemmPreferences.load(window.localStorage);
@@ -6578,7 +7211,7 @@
                     openSettings(settingsSection);
                 } catch (error) { setStatus("Could not reset preferences. Check app storage permissions.", true); }
             });
-            button(privacy, "Diagnostics", function () {
+            opens(button(privacy, "Diagnostics", function () {
                 visit(function () {
                     viewGeneration += 1;
                     clear(screen);
@@ -6590,8 +7223,8 @@
                     button(screen, "Back", backView);
                     focusFirst();
                 });
-            });
-            button(privacy, "About Vemm", function () { visit(openAbout); });
+            }));
+            opens(button(privacy, "About Vemm", function () { visit(openAbout); }));
             button(privacy, "Sign out", signOut);
             return storageWarning;
         } });
@@ -6605,12 +7238,9 @@
         retryView = null;
         viewGeneration += 1;
         homeRowsReorder = null;
-        clear(screen);
-        page(translate("Home rows"), "settings");
-        var menu = element("section", "settings-menu");
-        screen.appendChild(menu);
-        var notes = element("div", "settings-notes");
-        screen.appendChild(notes);
+        var body = settingsPage(translate("Home rows"));
+        var menu = body.list;
+        var notes = body.notes;
         var api = window.VemmHomeRows;
         var storeKey = homeRowsKey();
         var saved = api.load(window.localStorage, storeKey);
@@ -6619,14 +7249,12 @@
         var generation = viewGeneration;
         var controls = group(menu, "", "settings-group");
         var list = group(menu, "", "settings-group");
-        var reorderToggle = button(controls, translate("Reorder: {state}", { state: translate("Off") }), function () {
+        var reorderToggle = switchRow(controls, translate("Reorder"), false, function () {
             reordering = !reordering;
             homeRowsReorder = reordering ? move : null;
-            reorderToggle.setAttribute("aria-pressed", String(reordering));
-            reorderToggle.textContent = translate("Reorder: {state}", { state: translate(reordering ? "On" : "Off") });
+            setSwitch(reorderToggle, reordering);
             setStatus(reordering ? "Press Up or Down on a row to move it." : "");
-        }, true, "settings");
-        reorderToggle.setAttribute("aria-pressed", "false");
+        });
         function persist() {
             saved = api.choose(rows, saved);
             if (!api.save(window.localStorage, storeKey, saved)) { setStatus("Could not save Home rows. Check app storage permissions.", true); }
@@ -6640,6 +7268,7 @@
                     draw(index);
                 }, true, "none");
                 node.vemmRow = index;
+                node.className += " menu-switch";
                 node.setAttribute("aria-pressed", String(row.shown));
                 if (!row.shown) { node.className += " home-row-hidden"; }
             });
@@ -6661,7 +7290,6 @@
             saved = api.load(window.localStorage, storeKey);
             show(serverHubs);
         }, false, "refresh");
-        button(menu, "Back", backView);
         notes.appendChild(element("p", "help-text", translate("Enter shows or hides a row. Turn on Reorder, then press Up or Down on a row to move it.")));
         var serverHubs = [];
         function show(hubs) {
@@ -6696,17 +7324,13 @@
     function openErrorLog() {
         retryView = null;
         viewGeneration += 1;
-        clear(screen);
-        page(translate("Error log"), "settings");
-        var menu = element("section", "settings-menu");
-        screen.appendChild(menu);
+        var menu = settingsPage(translate("Error log")).list;
         var entries = window.VemmDevMode.list(window.localStorage).reverse();
         var actions = group(menu, "", "settings-group");
         button(actions, "Clear log", function () {
             window.VemmDevMode.clear(window.localStorage);
             openErrorLog();
-        }, false, "refresh");
-        button(actions, "Back", backView);
+        });
         var list = group(menu, "", "settings-group error-log");
         entries.forEach(function (entry) {
             var logged = entry.message;
@@ -6723,21 +7347,15 @@
         var focusedSetting = section && restoreView && restoreView.settingsSection === section ?
             Array.prototype.slice.call(screen.querySelectorAll("button")).indexOf(document.activeElement) : -1;
         viewGeneration += 1;
-        clear(screen);
         var sections = settingsSections();
-        var chosen = sections.filter(function (candidate) { return candidate.title === section; })[0];
+        var chosen = sections.filter(function (candidate) { return candidate.title === section && candidate.build; })[0];
         settingsSection = chosen ? section : "";
         if (settingsSection !== "Text overlay appearance") { subtitlePreview = false; }
-        page(translate(settingsSection || "Settings"), "settings");
-        var menu = element("section", "settings-menu");
-        menu.setAttribute("aria-label", translate(settingsSection || "Settings"));
-        screen.appendChild(menu);
-        // Info text goes below the options, outside the list card.
-        var notes = element("div", "settings-notes");
-        screen.appendChild(notes);
+        var body = settingsPage(translate(settingsSection || "Settings"));
+        var notes = body.notes;
         var warning = "";
         if (chosen) {
-            warning = chosen.build(menu, notes) || "";
+            warning = chosen.build(body.list, notes) || "";
             var shown = function () { openSettings(section); };
             shown.settingsSection = section;
             restoreView = shown;
@@ -6749,16 +7367,17 @@
                 lines.forEach(function (line) { device.appendChild(element("p", "help-text", line)); });
             });
             var sectionIcons = { "Playback": "film", "Audio & subtitles": "audio", "Text overlay appearance": "subtitles",
-                "Libraries": "library", "Home": "television", "Developer": "settings", "Profile": "profile", "Language": "language", "Appearance": "palette", "Graphics": "sparkle", "Performance": "gauge", "Privacy and data": "shield" };
+                "Libraries": "library", "Home": "television", "Live TV": "television", "Developer": "settings", "Profile": "profile", "Language": "language", "Appearance": "palette", "Graphics": "sparkle", "Performance": "gauge", "Privacy and data": "shield" };
             sections.forEach(function (candidate) {
-                button(menu, candidate.title, function () {
-                    visit(function () { openSettings(candidate.title); });
-                }, false, sectionIcons[candidate.title] || "none");
+                var icon = sectionIcons[candidate.title] || "none";
+                opens(candidate.open ? valueRow(body.list, translate(candidate.title), candidate.value, candidate.open, icon) :
+                    button(body.list, candidate.title, function () {
+                        visit(function () { openSettings(candidate.title); });
+                    }, false, icon));
             });
             restoreView = openSettings;
-            menu.className += " settings-sections";
+            body.card.className += " settings-sections";
         }
-        button(menu, "Back", backView);
         setStatus(warning, !!warning);
         focusFirst();
         var controls = screen.querySelectorAll("button");
@@ -6772,14 +7391,10 @@
         return false;
     }
 
-    function restoreScrubControl() {
-        var controls = screen.querySelectorAll(".playback-controls button");
-        var center = screen.querySelectorAll(".playback-center button");
-        var target = scrubReturnFocus;
-        if (!target || !target.parentNode || target.disabled || insideHidden(target)) {
-            target = center.length > 1 ? center[1] : controls[0];
-        }
-        if (target) { target.focus(); }
+    // Moving onto the controls row always lands on Pause, whichever control was last in it.
+    function focusPause() {
+        var control = screen.querySelector(".playback-center .menu-icon-pause, .playback-center .menu-icon-play");
+        if (control) { control.focus(); }
     }
 
     function moveFocus(direction, key) {
@@ -6788,7 +7403,6 @@
         var playerControls = hud && hud.querySelector(".playback-controls");
         var scrubSurface = hud && hud.querySelector(".playback-progress");
         if (playerControls && scrubSurface && !hud.hidden && key === 38 && playerControls.contains(active)) {
-            scrubReturnFocus = active;
             scrubSurface.focus();
             return;
         }
@@ -6797,24 +7411,22 @@
             return;
         }
         if (scrubSurface && !hud.hidden && key === 40 && active === scrubSurface) {
-            restoreScrubControl();
+            focusPause();
             return;
         }
         if (playerControls && !hud.hidden && key === 40 && playerControls.contains(active)) { return; }
         if (player && active && active.parentNode && /chapter-strip/.test(active.parentNode.className || "") && (key === 38 || key === 40)) {
-            var chaptersTab = Array.prototype.filter.call(screen.querySelectorAll(".playback-controls .player-tab"), function (node) {
-                return node.textContent === translate("Chapters");
-            })[0];
             // Down closes the strip so no other control is reachable beneath an open one.
             if (key === 40) { closePlayerPanel(); showHud(); }
-            if (chaptersTab) { chaptersTab.focus(); return; }
-            if (key === 40) { return; }
+            focusPause();
+            return;
         }
         if (browseKey(direction, key, active)) { return; }
         var vertical = key === 38 || key === 40;
         var parent = active && active.parentNode;
         var homeScreen = screen.className.indexOf("screen-home") !== -1;
         var row = !vertical && rowOf(active);
+        if (!row && pageStep && !document.getElementById("player-menu") && pageStep(active, key)) { return; }
         if (row) {
             var items = usable(row.querySelectorAll("button"));
             var side = items[items.indexOf(active) + direction];
@@ -6828,7 +7440,17 @@
                 // Down from the account button returns to this card without moving the rows.
                 if (active.vemmCard) { homeReturn = active; }
                 account.focus();
+            } else if (key === 39 && hasClass(row, /home-navigation/) && screen.querySelector(".search-control")) {
+                screen.querySelector(".search-control").focus();
             } else if (stepFeature && hasClass(row, /home-feature-actions/)) { stepFeature(direction); }
+            return;
+        }
+        var onSearch = hasClass(active, /(?:^| )search-control(?: |$)/);
+        if (onSearch && !vertical) {
+            if (key === 37) {
+                var headerTabs = usable(screen.querySelectorAll(".home-navigation button"));
+                headerTabs[headerTabs.length - 1].focus();
+            }
             return;
         }
         var onAccount = hasClass(active, /(?:^| )account-control(?: |$)/);
@@ -6844,7 +7466,7 @@
             if (accountNavigation) { accountNavigation.querySelector("button").focus(); }
             return;
         }
-        if (vertical && hasClass(parent, /home-navigation/)) {
+        if (vertical && (onSearch || hasClass(parent, /home-navigation/))) {
             if (key === 38) { return; }
             var featuredAction = screen.querySelector(".home-feature-primary");
             var firstCard = screen.querySelector(".media-card");
@@ -6937,7 +7559,31 @@
                 if (primary > 1 && score < best) { best = score; next = candidate; }
             });
         }
-        controls[next].focus();
+        (vertical ? episodeLanding(active, controls[next], key === 38) : controls[next]).focus();
+    }
+
+    // The season tabs and the episode row are entered at their current item, in order from either side, and Up from
+    // them goes to Play, as from Home's first shelf. Going by the nearest control alone could land on any season's
+    // tab, skip the tabs, or step along the row when nothing lies below it.
+    function episodeLanding(active, target, up) {
+        var row = screen.querySelector(".episode-row");
+        if (!row) { return target; }
+        var tabs = screen.querySelector(".season-tabs");
+        var tab = tabs && tabs.vemmSelected;
+        var primary = screen.querySelector(".detail-actions .detail-primary");
+        if (tabs && tabs.contains(active)) {
+            if (up) { return primary || target; }
+            if (!row.vemmEntry) { row.vemmWanted = true; }
+            return row.vemmEntry || active;
+        }
+        if (row.contains(active)) {
+            if (up) { return tab || primary || target; }
+            return row.contains(target) ? active : target;
+        }
+        if (row.contains(target) || tabs && tabs.contains(target)) {
+            return (up ? row.vemmEntry : tab || row.vemmEntry) || target;
+        }
+        return target;
     }
 
     function onKeyDown(event) {
@@ -6990,7 +7636,8 @@
         }
         if (player && active && active.id === "playback-progress" && key === 13) {
             event.preventDefault();
-            commitScrub();
+            // A scrub waiting its 0.4 s is sent now; otherwise OK pauses or resumes like the Pause button.
+            if (scrubTarget !== null) { commitScrub(); } else { togglePlayer(); }
             return;
         }
         if (key === 10009 || key === 27 || key === 8) {
@@ -6998,7 +7645,7 @@
             event.preventDefault();
             if (player && active && active.id === "playback-progress") {
                 commitScrub();
-                restoreScrubControl();
+                focusPause();
                 return;
             }
             if (player && subtitleTiming) { closeSubtitleTiming(); return; }
@@ -7049,17 +7696,9 @@
             }
             var fileInfo = screen.querySelector(".file-info-panel");
             if (fileInfo && !fileInfo.hidden) {
-                fileInfo.hidden = true;
+                fileInfo.parentNode.removeChild(fileInfo);
                 var detailMore = screen.querySelector('[aria-label="More"]');
                 if (detailMore) { detailMore.focus(); }
-                return;
-            }
-            var overflow = screen.querySelector(".detail-overflow");
-            if (overflow && !overflow.hidden) {
-                overflow.hidden = true;
-                var moreControl = screen.querySelector('.detail-actions [aria-expanded]');
-                moreControl.setAttribute("aria-expanded", "false");
-                moreControl.focus();
                 return;
             }
             backView();
@@ -7200,7 +7839,7 @@
             ["MediaPlay", "MediaPause", "MediaPlayPause", "MediaStop", "MediaFastForward", "MediaRewind"].forEach(function (name) {
                 window.tizen.tvinputdevice.registerKey(name);
             });
-            ["Tools", "Info", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"].forEach(function (name) {
+            ["Tools", "Info", "ChannelUp", "ChannelDown", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"].forEach(function (name) {
                 try { window.tizen.tvinputdevice.registerKey(name); } catch (ignore) { /* optional card-menu shortcut */ }
             });
         } catch (error) { setStatus("Some media keys could not be registered. Use on-screen playback controls.", true); }

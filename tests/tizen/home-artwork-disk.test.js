@@ -156,6 +156,7 @@ function boot(options) {
             await settle();
         },
         click: click,
+        back: function () { document.dispatchEvent(new window.KeyboardEvent("keydown", { keyCode: 10009, bubbles: true })); },
         labels: function () {
             return Array.from(document.querySelectorAll("button")).map(function (entry) { return entry.textContent; });
         },
@@ -277,7 +278,7 @@ async function libraryArtwork() {
             assert(t.labels().some(function (label) { return pattern.test(label); }), "Performance lists " + pattern);
         });
         assert(/Saved artwork:/.test(t.notes()) || /Keeps the pictures/.test(t.notes()), "Performance carries the artwork notes");
-        t.click("Back"); await t.settle();
+        t.back(); await t.settle();
         t.click("Privacy and data"); await t.settle();
         moved.forEach(function (pattern) {
             assert(!t.labels().some(function (label) { return pattern.test(label); }), "Privacy and data no longer has " + pattern);

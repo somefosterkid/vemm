@@ -128,11 +128,12 @@ function boot(options) {
     await a.click("Settings");
     await a.click("Libraries");
     await a.click("Ratings shown: 4 of 4");
+    function back() { a.document.dispatchEvent(new a.window.KeyboardEvent("keydown", { keyCode: 10009, bubbles: true })); return a.settle(); }
     await a.click("IMDb");
     assert.deepStrictEqual(a.stored().ratingSources, ["rt_critic", "rt_audience", "tmdb"], "The choice is persisted");
     assert.strictEqual(a.button("IMDb").getAttribute("aria-pressed"), "false");
     assert.strictEqual(a.button("TMDB").getAttribute("aria-pressed"), "true");
-    await a.click("Back");
+    await back();
     assert(a.button("Ratings shown: 3 of 4"), "The settings entry reflects the choice");
 
     // Owner: one entry per movie/show library, choosing sends a PUT and explains the refresh.
@@ -149,9 +150,9 @@ function boot(options) {
     assert.strictEqual(put[0].path, "/library/sections/1/prefs");
     assert.strictEqual(put[0].search, "?ratingsSource=0");
 
-    await a.click("Back");
-    await a.click("Back");
-    await a.click("Back");
+    await back();
+    await back();
+    await back();
     await a.click("Open details");
     var narrowed = a.ratingsText();
     assert(narrowed.indexOf("7.8/10") === -1 && narrowed.indexOf("91%") !== -1, "Hidden sources are not shown: " + narrowed);

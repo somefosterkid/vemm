@@ -23,10 +23,10 @@
                 "Resume" : "Play" });
         }
         // OK on an ordinary card, or on a Continue Watching card in "details" mode, already opens
-        // the page; the row is only useful when OK plays.
-        if (options.deck && options.continueAction === "play") { list.push({ id: "details", label: "Go to details" }); }
-        if (type === "episode" && item.grandparentRatingKey) { list.push({ id: "show", label: "Go to show" }); }
-        if (type === "episode" && item.parentRatingKey) { list.push({ id: "season", label: "Go to season" }); }
+        // the page; the row is only useful when OK plays. A show's own episode list (listed) always plays.
+        if (options.listed || options.deck && options.continueAction === "play") { list.push({ id: "details", label: "Go to details" }); }
+        if (type === "episode" && item.grandparentRatingKey && !options.listed) { list.push({ id: "show", label: "Go to show" }); }
+        if (type === "episode" && item.parentRatingKey && !options.listed) { list.push({ id: "season", label: "Go to season" }); }
         if (watchable.indexOf(type) !== -1) {
             var partial = !!item.viewOffset || (item.viewedLeafCount > 0 && item.viewedLeafCount < item.leafCount);
             var watched = !!item.viewCount || (item.leafCount > 0 && item.viewedLeafCount === item.leafCount);

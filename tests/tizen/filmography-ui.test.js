@@ -9,8 +9,9 @@ function Node(tag, text) {
     this.children = [];
     this.events = {};
     this.value = "";
+    this.style = {};
 }
-Node.prototype.appendChild = function (child) { this.children.push(child); return child; };
+Node.prototype.appendChild = function (child) { this.children.push(child); child.parentNode = this; return child; };
 Object.defineProperty(Node.prototype, "textContent", {
     get: function () { return this.text || this.children.map(function (child) { return child.textContent; }).join(""); },
     set: function (value) { this.text = value; }
@@ -18,8 +19,12 @@ Object.defineProperty(Node.prototype, "textContent", {
 Node.prototype.removeChild = function (child) { this.children.splice(this.children.indexOf(child), 1); };
 Node.prototype.replaceChild = function (next, previous) {
     this.children.splice(this.children.indexOf(previous), 1, next);
+    next.parentNode = this;
     return previous;
 };
+Node.prototype.getBoundingClientRect = function () { return { left: 0, right: 0, top: 0, bottom: 0 }; };
+Node.prototype.getAttribute = function () { return null; };
+Node.prototype.removeAttribute = function () {};
 Object.defineProperty(Node.prototype, "firstChild", { get: function () { return this.children[0]; } });
 Node.prototype.addEventListener = function (name, callback) { this.events[name] = callback; };
 Node.prototype.setAttribute = function () {};
@@ -46,6 +51,7 @@ async function journey(indexFails, language, largeCareer) {
         querySelector: function () { return null; },
         addEventListener: function () {}
     };
+    var reads = [];
     var accountApi = {
         getProfiles: function () { return Promise.resolve([{ uuid: "synthetic-profile", title: "Synthetic Guest" }]); },
         switchProfile: function () { return Promise.resolve("synthetic-profile-token"); },
@@ -80,13 +86,14 @@ async function journey(indexFails, language, largeCareer) {
             return Promise.resolve(String(id) === "7" ? movie : { ratingKey: String(id), type: "movie", title: "Local Held Film" });
         },
         getRelated: function () { return Promise.resolve({ Hub: [] }); },
-        personLibraryIndex: function (personId) {
+        getPerson: function (section, personId) {
             assert.strictEqual(personId, 921);
             if (indexFails) { return Promise.reject(new Error("synthetic index failure")); }
-            return Promise.resolve({ complete: true, index: realApi.localCatalogueIndex([
-                { type: "movie", guid: "plex://movie/5d7768295af944001f1f7477", ratingKey: "41" }
-            ]) });
-        }
+            return Promise.resolve({ totalSize: 1, Metadata: [
+                { type: "movie", guid: "plex://movie/5d7768295af944001f1f7477", ratingKey: "41", title: "Local Held Film", year: 2001 }
+            ] });
+        },
+        titleCredits: function (keys) { reads.push(keys); return Promise.resolve([]); }
     };
     var api = {
         ratingBadges: function () { return []; },
@@ -96,12 +103,17 @@ async function journey(indexFails, language, largeCareer) {
         }; },
         createAccountClient: function () { return accountApi; },
         selectServer: function () { return Promise.resolve({ relay: false, client: server }); },
-        matchCredit: realApi.matchCredit
+        matchCredit: realApi.matchCredit,
+        localCatalogueIndex: realApi.localCatalogueIndex
     };
     var window = { PlexApi: api, VemmHomeHero: require("../../samsung/Vemm/js/home-hero.js"), Promise: Promise, URL: URL, Blob: Blob,
         fetch: function () { assert.fail("The synthetic API must not use the network"); },
-        addEventListener: function () {} };
-    vm.runInNewContext(fs.readFileSync(require.resolve("../../samsung/Vemm/js/i18n.js"), "utf8"), window);
+        addEventListener: function () {},
+        document: document, window: null, setTimeout: function () { return 1; }, clearTimeout: function () {} };
+    window.window = window;
+    ["i18n", "people", "cast-ui"].forEach(function (name) {
+        vm.runInNewContext(fs.readFileSync(require.resolve("../../samsung/Vemm/js/" + name + ".js"), "utf8"), window);
+    });
     vm.runInNewContext(fs.readFileSync(require.resolve("../../samsung/Vemm/main.js"), "utf8"), {
         document: document, window: window,
         setTimeout: function () { return 1; }, clearTimeout: function () {}
@@ -109,6 +121,7 @@ async function journey(indexFails, language, largeCareer) {
     function find(label) {
         return screen.querySelectorAll().find(function (node) { return node.tag === "button" && node.textContent === label; });
     }
+    function rowOf(card) { return card.parentNode; }
     function click(label) {
         var control = find(label);
         assert(control, "Missing control: " + label);
@@ -125,28 +138,32 @@ async function journey(indexFails, language, largeCareer) {
     click("Synthetic Actor");
     await settle();
     if (largeCareer) {
-        assert(find("Career title 0 / Search libraries"));
-        assert(!find("Career title 50 / Search libraries"), "Career pages must keep the DOM bounded");
-        for (var page = 0; page < 5; page += 1) { click("Next page"); }
-        assert(find("Career title 250 / Search libraries"), "Credits after the old 200-title cap remain reachable");
-        click("Previous page");
-        assert(find("Career title 200 / Search libraries"));
+        var first = find("Career title 0");
+        assert(first);
+        assert(!find("Career title 50"), "A long career's row keeps the DOM bounded");
+        var row = rowOf(first);
+        // Moving along the row builds what lies ahead, all the way to the last credit.
+        for (var page = 0; page < 12; page += 1) { row.events.focus({ target: row.children[row.children.length - 1] }); }
+        assert(find("Career title 250"), "Credits after the old 200-title cap remain reachable");
         return;
     }
     if (indexFails) {
-        assert(find("Held Film / 2001 / Lead / Search libraries"), "An unchecked library must not claim availability");
-        assert(status.textContent.indexOf("could not be checked") !== -1);
+        assert(find("Held Filmas Lead"), "An unchecked library must not claim availability: the credit stays in the career row");
+        assert(find("Retry"), "and the failure says so");
+        assert(/synthetic index failure/.test(status.textContent));
+        assert(find("Held Filmas Lead").vemmCard.options.open, "and it has a search of its own rather than a title here");
         return;
     }
     if (language === "es") {
-        assert.strictEqual(status.textContent, window.VemmI18n.text("{count} credits are in this library.", { count: 1 }));
-        assert.notStrictEqual(status.textContent, "1 credits are in this library.");
+        assert(find("Local Held Film" + window.VemmI18n.text("as {character}", { character: "Lead" })));
+        assert(!find("Local Held Filmas Lead"), "The caption is translated");
         return;
     }
-    assert(find("Absent Show / Search libraries"));
-    assert(!find("Held Film / 2001 / Lead / Search libraries"));
-    assert.strictEqual(status.textContent, "1 credits are in this library.");
-    click("Held Film / 2001 / Lead / In this library");
+    assert(find("Absent Show"), "A title not on this server has a card, with its bare title when nothing else is known");
+    assert(!find("Held Filmas Lead"), "A title on this server is not repeated in the career row");
+    assert(find("Local Held Filmas Lead"), "and its card names the character from the filmography");
+    assert.deepStrictEqual(reads, [], "so no title had to be read for it");
+    click("Local Held Filmas Lead");
     await settle();
     assert.deepStrictEqual(opened, ["7", "41"]);
 }

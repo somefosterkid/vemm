@@ -11,7 +11,7 @@ living room, several metres from the panel, using a remote.
 The LG/webOS **application screens in the looping demo on [plxnative.com](https://plxnative.com/#feel)**
 are the primary visual reference, not the website's landing-page styling or the LG launcher.
 The owner explicitly selected this loop after reviewing the Samsung redesign.
-It shows artwork spanning the screen, compact centred Home/Movies/TV Shows/Search navigation,
+It shows artwork spanning the screen, compact centred Home/Movies/TV Shows navigation with Search opposite the profile,
 a separate profile control, title artwork with restrained metadata, a clear Continue/Resume action
 and quieter secondary actions. The poster shelf meets the hero rather than starting below an
 isolated feature panel. In the shelf view, focused artwork grows and its title/remaining time
@@ -106,16 +106,45 @@ Rationale, held by tests where it can be measured:
 | Sign-in and account recovery | Paired short code/QR with retry and automatic expiry renewal; optional saved sign-in is managed in Settings |
 | Profiles and PIN | Centred circular profile photos with initials while unavailable; unprotected profiles select directly, protected profiles use separate numeric PIN entry |
 | Servers and favourites | Structured selection rows, then grouped account/navigation actions |
-| Home | Full-bleed feature, persistent Home/favourite-library/Search capsule, separate Account menu, explicit play/info/cycle controls and poster shelves |
+| Home | Full-bleed feature, persistent Home/favourite-library capsule (Playlists only when the profile has some), round Search at the right opposite the separate Account menu, explicit play/info/cycle controls and poster shelves |
 | Libraries and collections | Browse toolbar and six-column portrait grid; three-column landscape or square music artwork |
-| Search and people | Large search field, server-labelled shelves; biography/portrait and image/title credit rows |
-| Details | Cinematic art and scrim, expandable two-line synopsis, primary action and round restart/More controls; secondary actions hidden until requested; extras and cast below |
+| Search and people | Large search field, server-labelled shelves; a person's page has their whole photo at the left (shown uncropped), name, details and biography from the middle to the right, then rows of poster cards: On this server, then a row per job from Plex's filmography. Each card's caption says what they did ("as Mike", or the job) in a line that holds its place until it is known |
+| Cast & Crew | One page: that person's page above one row of everyone on the title. Moving along the row changes the page above after 350 ms of rest, so a held key asks for nothing; OK or Up goes into the person's titles; Back leaves to the details page, and returns to the same person and card |
+| Details | Cinematic art and scrim, two-line synopsis with Read more on the Play row (a modal with the whole text), primary action and restart/More controls; secondary actions in More, a menu list over the page that moves nothing; extras below, and the top 16 of the cast with View all (both open the Cast & Crew page; from a linked account it adds Plex's biography and filmography). All text carries a tight shadow, and what sits highest on the picture a plate. A show's page, and an episode's, shortens the hero so a bar of seasons (none for one season, Specials last) and a row of the chosen season's episodes share its first screen; a show's cursor starts on the suggested episode. A page draws at once from what is known (a remembered answer, or the card's list item) and fills the rest in place; only a server slower than a second with nothing known shows a lone Back |
 | Watchlist and catalogue | Poster grid and selected filters; cover, metadata and explicit local-availability actions |
 | Guide and DVR | Provider selection, program rows, channel/date views, recording status and server-supplied preference fields |
 | Photos | Contained image above one grouped navigation/slideshow row |
-| Playback | Icon transport/progress overlay; grouped audio/subtitle choices and native tracks behind Device tracks; More and submenu return paths; five-second auto-hide |
-| Settings and diagnostics | Single-column value rows; quality/language alternatives on separate choice pages; privacy explanation in Diagnostics; Home holds the launch-profile toggle and the per-profile Home rows list (Enter shows or hides, Reorder moves with Up/Down); Developer settings (error log, technical readouts, playback decisions in Stats for nerds) appear only after the code is typed on the About version line |
+| Playback | Icon transport/progress overlay; one flat audio or subtitle list (see [Menus](#menus)) with native tracks behind Device tracks; More and submenu return paths; five-second auto-hide |
+| Settings and diagnostics | One list of value rows (see [Menus](#menus)); quality/language alternatives on separate choice pages, and a section with one setting opens its choices directly; privacy explanation in Diagnostics; Home holds the launch-profile toggle and the per-profile Home rows list (Enter shows or hides, Reorder moves with Up/Down); Developer settings (error log, technical readouts, playback decisions in Stats for nerds) appear only after the code is typed on the About version line |
 | Confirmations and states | Explicit operation/item copy, confirmation and cancel; readable loading, empty and error/retry copy |
+
+## Menus
+
+Settings pages and player panels are the same thing: a title, one list of rows and, where needed, notes or a footer
+that stay in view. There is one row, 64px tall with 26px text, filled with the focus colour when focused. What is at
+its right edge says what OK will do, and marks are drawn so they do not depend on the panel's fonts:
+
+| Right edge | Row | OK |
+|---|---|---|
+| Value and chevron | A setting with several values, or a row that opens a page | Opens the list; focus starts on the current value, and choosing returns with the new value showing |
+| Value alone | A setting with a few values, such as text size | Steps to the next value in place, applied at once |
+| Switch | On or off, one of several independent choices | Flips in place |
+| Check mark | The current one of several choices | Choosing it again changes nothing |
+| Nothing | An action | Does it |
+
+The remote's Back key goes up one level, so lists carry no Back, Close or return rows; a page with nothing else to
+focus keeps one. Vertical movement wraps, so the last rows are one press from the first.
+
+The track menus are one flat list, because a file can carry 40 subtitles and a language step made every choice several
+presses away: the current track, Subtitles off, others in the current language, the viewer's languages (their Plex
+account's, then the app's), then the others in the file's order under one heading. Plex names a language in that
+language and sorting across scripts helps nobody, so nothing is re-sorted. Tracks sharing a language say what differs
+(Forced, SDH, the file's own title; the format only where they would otherwise read the same). Search and Appearance
+sit in a footer that never scrolls away, one press Up from the first row.
+
+A list moves by a transform with the focused row centred, so a press repaints only the two rows that changed and a long
+menu costs no layout; only a one-row step glides. The panel clips with a plain rectangle, because a rounded clip around a
+composited layer needs a mask. Faded edges show that a list continues.
 
 ## Layout and input
 

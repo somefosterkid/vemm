@@ -151,7 +151,7 @@ async function run() {
         });
     };
     ["js/plex-api.js", "js/avplay.js", "js/playback.js", "js/subtitles.js", "js/preferences.js",
-        "js/session.js", "js/recents.js", "js/home-hero.js", "js/item-menu.js", "js/skip-markers.js", "js/account-preferences.js", "js/file-info.js", "js/search-ui.js", "js/preload.js", "js/dev-mode.js", "js/reconnect.js", "js/track-memory.js", "js/ends-at.js", "js/i18n.js", "main.js"].forEach(function (file) {
+        "js/session.js", "js/recents.js", "js/home-hero.js", "js/item-menu.js", "js/skip-markers.js", "js/account-preferences.js", "js/subtitle-search.js", "js/track-menu.js", "js/file-info.js", "js/search-ui.js", "js/preload.js", "js/episodes.js", "js/dev-mode.js", "js/reconnect.js", "js/track-memory.js", "js/ends-at.js", "js/i18n.js", "main.js"].forEach(function (file) {
         window.eval(fs.readFileSync(path.join(app, file), "utf8"));
     });
     function click(text) {
@@ -317,7 +317,7 @@ async function run() {
         emptyShelf.remove();
         var navigation = window.document.querySelector(".home-navigation");
         assert(navigation, "Home navigation belongs above the shelves, not below them");
-        assert(navigation.querySelector(".menu-icon-search"), "Search needs a visible icon");
+        assert(window.document.querySelector(".browse-header > .menu-icon-search"), "Search needs a visible icon");
         assert(window.document.querySelector(".home-utilities .menu-icon-settings"), "Settings needs a visible icon");
         assert(window.document.querySelector(".library-button"), "Library choices need visible labels");
         click("Account");
@@ -346,11 +346,10 @@ async function run() {
             assert(icon && icon[1] !== "none", node.textContent + " needs a top-level icon");
             assert(iconStyle.indexOf(".menu-icon-" + icon[1] + "::before") !== -1, icon[1] + " has an icon style");
         });
-        assert(/menu-icon-back/.test(Array.from(window.document.querySelectorAll(".settings-menu button")).pop().className));
-        assert(/\.settings-menu \.menu-control\.menu-icon-back::after\s*\{\s*content:\s*none/.test(iconStyle),
-            "Back must not show the forward chevron the other rows use");
+        assert(Array.from(window.document.querySelectorAll(".settings-menu button")).every(function (node) { return /menu-has-sub/.test(node.className); }),
+            "Every section row says it opens another list");
         assert.deepStrictEqual(Array.from(window.document.querySelectorAll(".settings-menu button")).map(function (node) {
-            return node.textContent; }), ["Playback", "Text overlay appearance", "Language", "Graphics", "Performance", "Privacy and data", "Back"],
+            return node.textContent; }), ["Playback", "Text overlay appearance", "Language: English", "Graphics", "Performance", "Privacy and data"],
             "Settings lists only its sections");
         function headerTitle() { return window.document.querySelector(".app-header .header-title").textContent; }
         function pressKey(key) { window.document.dispatchEvent(new window.KeyboardEvent("keydown", { keyCode: key, bubbles: true })); }
@@ -371,13 +370,15 @@ async function run() {
         var notes = window.document.querySelector(".screen-settings > .settings-notes .help-text");
         assert(notes, "Info text sits below the options, outside the card");
         assert(window.document.querySelector(".settings-menu").compareDocumentPosition(notes) & 4, "Info text follows the list");
-        click("Back");
+        pressKey(10009);
         assert.strictEqual(window.document.activeElement.textContent, "Text overlay appearance", "Back restores focus on the section entry");
         assert.strictEqual(headerTitle(), "Settings");
-        Array.from(window.document.querySelectorAll(".settings-menu button")).find(function (node) { return node.textContent === "Language"; }).focus();
-        click("Language");
-        click("Back");
-        assert.strictEqual(window.document.activeElement.textContent, "Language", "Back restores the focused section, not the first");
+        Array.from(window.document.querySelectorAll(".settings-menu button")).find(function (node) { return node.textContent === "Language: English"; }).focus();
+        click("Language: English");
+        assert.strictEqual(headerTitle(), "Language", "A section with one setting goes straight to its choices");
+        assert.strictEqual(window.document.activeElement.textContent, "English", "Focus starts on the current choice");
+        pressKey(10009);
+        assert.strictEqual(window.document.activeElement.textContent, "Language: English", "Back restores the focused section, not the first");
         click("Privacy and data");
         click("About Vemm");
         assert.strictEqual(headerTitle(), "", "Leaving Settings clears the top-bar title");
@@ -387,7 +388,7 @@ async function run() {
         assert(window.document.body.textContent.includes("working brand"));
         click("Back");
         assert(window.document.querySelector(".settings-menu"), "Back from About Vemm returns to its Settings section");
-        click("Back");
+        pressKey(10009);
         click("Playback");
         assert(!window.document.querySelector(".settings-sections"), "Inner Settings pages stay text-first");
         Array.from(window.document.querySelectorAll(".settings-menu button")).forEach(function (node) {
@@ -398,14 +399,14 @@ async function run() {
         }).length, 1, "Settings must show one quality value, not every alternative");
         click("Quality: Original quality");
         assert.deepStrictEqual(Array.from(window.document.querySelectorAll(".screen button")).map(function (node) {
-            return node.textContent; }), ["Original quality", "2160p · 40 Mbps (converts)", "1440p · 25 Mbps (converts)",
-            "1080p · 20 Mbps (converts)", "1080p · 16 Mbps (converts)", "1080p · 12 Mbps (converts)",
-            "1080p · 10 Mbps (converts)", "1080p · 8 Mbps (converts)", "720p · 4 Mbps (converts)",
-            "720p · 2 Mbps (converts)", "480p · 0.7 Mbps (converts)", "Recheck speed", "Back"],
+            return node.textContent; }), ["Original quality", "2160p · 40 Mbps", "1440p · 25 Mbps",
+            "1080p · 20 Mbps", "1080p · 16 Mbps", "1080p · 12 Mbps",
+            "1080p · 10 Mbps", "1080p · 8 Mbps", "720p · 4 Mbps",
+            "720p · 2 Mbps", "480p · 0.7 Mbps", "Recheck speed"],
             "Settings lists every quality, Original first, then by resolution and Mbps, highest first");
         assert.deepStrictEqual(Array.from(window.document.querySelectorAll(".screen .group-title")).map(function (node) {
-            return node.textContent; }), ["Original", "4K", "1440p", "1080p", "720p", "480p"],
-            "Quality options sit under resolution headings");
+            return node.textContent; }), ["Converted by the server"],
+            "Original stands alone; one heading over what the server converts to");
         assert(!window.document.querySelector(".screen .group-title[tabindex], .screen .group-title button"),
             "Headings are not focusable");
         var qualityButtons = Array.from(window.document.querySelectorAll(".screen button"));
@@ -421,15 +422,15 @@ async function run() {
         var choiceButtons = Array.from(window.document.querySelectorAll(".screen button"));
         choiceButtons[choiceButtons.length - 1].focus();
         pressKey(40);
-        assert.strictEqual(window.document.activeElement, choiceButtons[0], "Down on Back wraps to the first choice");
+        assert.strictEqual(window.document.activeElement, choiceButtons[0], "Down on the last row wraps to the first choice");
         pressKey(38);
-        assert.strictEqual(window.document.activeElement, choiceButtons[choiceButtons.length - 1], "Up on the first choice wraps to Back");
+        assert.strictEqual(window.document.activeElement, choiceButtons[choiceButtons.length - 1], "Up on the first choice wraps to the last row");
         assert.strictEqual(window.document.querySelector('button[aria-pressed="true"]').textContent, "Original quality",
             "Choice state must be visible independently of focus");
-        click("720p · 4 Mbps (converts)");
+        click("720p · 4 Mbps");
         assert(window.document.querySelector(".settings-menu"), "Selecting quality must return to Settings");
-        assert.strictEqual(window.document.activeElement.textContent, "Quality: 720p · 4 Mbps (converts)", "Choice pages restore parent focus");
-        click("Quality: 720p · 4 Mbps (converts)");
+        assert.strictEqual(window.document.activeElement.textContent, "Quality: 720p · 4 Mbps", "Choice pages restore parent focus");
+        click("Quality: 720p · 4 Mbps");
         click("Original quality");
         // Settings > Playback measures the TV-to-server path with a ranged download.
         var speedRequests = [];
@@ -462,12 +463,12 @@ async function run() {
         assert(screenText().includes("24 Mbps") && screenText().includes("3 of 8 seconds"), "Live reading and progress: " + screenText());
         speedRequests[0].onload();
         await settle();
-        assert(screenText().includes("24 Mbps to this server. Recommended: 1080p · 16 Mbps (converts)"), screenText());
-        assert.deepStrictEqual(labels(), ["Use 1080p · 16 Mbps (converts)", "Test again", "Back"]);
+        assert(screenText().includes("24 Mbps to this server. Recommended: 1080p · 16 Mbps"), screenText());
+        assert.deepStrictEqual(labels(), ["Use 1080p · 16 Mbps", "Test again", "Back"]);
         click(labels()[0]);
         assert.strictEqual(headerTitle(), "Playback", "Use returns to Playback");
         assert(Array.from(window.document.querySelectorAll(".settings-menu button")).some(function (node) {
-            return node.textContent === "Quality: 1080p · 16 Mbps (converts)"; }), "Use saves the recommended quality");
+            return node.textContent === "Quality: 1080p · 16 Mbps"; }), "Use saves the recommended quality");
         click("Test connection speed");
         await settle();
         speedRequests[1].onerror();
@@ -487,10 +488,10 @@ async function run() {
         assert(speedRequests[3].aborted, "Back during a test cancels the download");
         assert.strictEqual(headerTitle(), "Playback");
         // One result (24 Mbps) is saved: options above 80% of it (19.2 Mbps) carry a warning, Original never.
-        click("Quality: 1080p · 16 Mbps (converts)");
+        click("Quality: 1080p · 16 Mbps");
         var warned = Array.from(window.document.querySelectorAll(".screen button")).filter(function (node) {
             return node.querySelector(".quality-warning"); }).map(function (node) { return node.textContent; });
-        assert.deepStrictEqual(warned, ["2160p · 40 Mbps (converts)", "1440p · 25 Mbps (converts)", "1080p · 20 Mbps (converts)"]);
+        assert.deepStrictEqual(warned, ["2160p · 40 Mbps", "1440p · 25 Mbps", "1080p · 20 Mbps"]);
         assert.strictEqual(window.document.querySelector(".quality-warning").getAttribute("aria-label"), "May buffer on your connection");
         assert(window.document.querySelector(".screen-settings > .settings-notes").textContent.includes("Recent speed: 24 Mbps (1 test)"),
             "The recent average is info text below the list");
@@ -500,10 +501,10 @@ async function run() {
         await settle();
         click("Back");
         assert.strictEqual(headerTitle(), "Quality", "Back from the recheck returns to the Quality page");
-        click("Back");
+        pressKey(10009);
         assert.strictEqual(headerTitle(), "Playback");
         window.Date.now = realNow;
-        click("Quality: 1080p · 16 Mbps (converts)");
+        click("Quality: 1080p · 16 Mbps");
         click("Original quality");
         var skipInterval = Array.from(window.document.querySelectorAll(".settings-menu button")).find(function (node) {
             return node.textContent === "Skip interval: 10 seconds";
@@ -526,8 +527,8 @@ async function run() {
         assert.deepStrictEqual(Array.from(window.document.querySelectorAll(".screen button")).map(function (node) {
             return node.textContent; }).slice(0, 3), ["Auto", "Force", "Off"]);
         click("Auto");
-        click("Back");
-        click("Back");
+        pressKey(10009);
+        pressKey(10009);
         await settle();
         click("Movies");
         await settle();
@@ -767,19 +768,19 @@ async function run() {
         assert(window.document.querySelector(".search-recents").hidden, "Recents hide once a query is present");
         assert.strictEqual(window.document.querySelectorAll(".media-card").length, 1);
         window.document.querySelector(".media-card").click();
-        assert.strictEqual(window.document.activeElement.textContent, "Back",
-            "A pending detail request must retain a focused escape control");
+        assert.strictEqual(window.document.activeElement.textContent, "Resume",
+            "A press draws the page at once from the card, with the cursor on Play");
         await settle();
         assert(window.document.querySelector(".synopsis").textContent.includes("Synthetic metadata"));
-        assert(window.document.querySelector(".detail-expand"),
+        assert(window.document.querySelector(".detail-actions").textContent.includes("Read more"),
             "A clamped synopsis must have a full-description route");
-        assert(window.document.querySelector(".detail-overflow[hidden]"),
+        assert(!window.document.querySelector(".detail-actions").textContent.includes("File information"),
             "Secondary detail actions must not form a visible wall of pills");
         assert.strictEqual(window.document.querySelector(".detail-progress-time").textContent, "0:25 / 1:40",
             "The detail page shows the resume position in numbers");
         click("Read more");
-        assert(window.document.querySelector(".detail-synopsis").classList.contains("expanded"));
-        click("Read less");
+        assert.strictEqual(window.document.querySelector(".overview-text").textContent, "Synthetic metadata");
+        back();
         assert.strictEqual(requests.filter(function (request) { return request.path === "/:/timeline"; }).length, 0);
         click("More");
         click("File information");
@@ -825,18 +826,19 @@ async function run() {
         buttons[2].click();
         assert(!fileInfo.textContent.includes("Size:"), "Unreported file size must be omitted rather than called zero");
         window.document.dispatchEvent(new window.KeyboardEvent("keydown", { keyCode: 27, bubbles: true }));
-        assert(fileInfo.hidden, "Back closes the inspector without leaving item details");
+        assert(!window.document.querySelector(".file-info-panel"), "Back closes the inspector without leaving item details");
+        assert(window.document.querySelector(".detail-hero"));
         var mutations = function () {
             return requests.filter(function (request) {
                 return ["/:/scrobble", "/:/unscrobble", "/actions/removeFromContinueWatching"].indexOf(request.path) !== -1;
             });
         };
         click("More");
-        assert(!Array.from(window.document.querySelectorAll(".detail-overflow button")).some(function (node) {
+        assert(!Array.from(window.document.querySelectorAll("#player-menu button")).some(function (node) {
             return node.textContent === "Back";
         }), "The More submenu has no Back button; the remote's Back key closes it");
         window.document.dispatchEvent(new window.KeyboardEvent("keydown", { keyCode: 27, bubbles: true }));
-        assert(window.document.querySelector(".detail-overflow").hidden);
+        assert(!window.document.getElementById("player-menu"));
         assert.strictEqual(window.document.activeElement.getAttribute("aria-label"), "More");
         click("More");
         click("Mark unwatched");
@@ -1051,7 +1053,9 @@ async function run() {
         assert(position > pausedPosition && position <= movie.duration, "Paused scrub advances without exceeding duration");
         assert.strictEqual(state, "PAUSED", "Scrubbing while paused leaves playback paused");
         remote("keydown", 13);
-        assert.strictEqual(state, "PAUSED", "OK on the slider commits but does not toggle playback");
+        assert.strictEqual(state, "PLAYING", "OK on the slider resumes a paused video");
+        remote("keydown", 13);
+        assert.strictEqual(state, "PAUSED", "and pauses it again");
         remote("keydown", 27);
         assert.strictEqual(window.document.activeElement, pauseControl, "Back from the slider restores its transport control");
         click("Pause / Play");
@@ -1104,11 +1108,12 @@ async function run() {
         assert(!requests.some(function (request) { return request.method === "PUT" && /^\/library\/parts\//.test(request.path); }),
             "Starting playback with no track choice must not overwrite the PMS stream selection");
         click("Subtitles");
+        click("Appearance");
         click("Text size: Medium");
         assert(window.document.querySelector(".player-menu").textContent.includes("Text size: Large"),
             "Caption style controls update the persisted selection");
+        click("Text overlay: Off");
         click("English");
-        click("Text overlay / English");
         await settle();
         var subtitleOverlay = window.document.getElementById("subtitle-text");
         assert(subtitleOverlay.classList.contains("subtitle-size-large"),
@@ -1140,11 +1145,12 @@ async function run() {
         Object.defineProperty(window.document, "hidden", { configurable: true, value: true });
         window.document.dispatchEvent(new window.Event("visibilitychange")); await settle();
         assert.strictEqual(state, "NONE", "Backgrounding must stop native playback");
-        var opens = nativeCalls.filter(function (call) { return call === "open"; }).length;
+        var plays = nativeCalls.filter(function (call) { return call === "play"; }).length;
         Object.defineProperty(window.document, "hidden", { configurable: true, value: false });
         window.document.dispatchEvent(new window.Event("visibilitychange")); await settle();
-        assert.strictEqual(nativeCalls.filter(function (call) { return call === "open"; }).length, opens,
+        assert.strictEqual(nativeCalls.filter(function (call) { return call === "play"; }).length, plays,
             "Foregrounding must never start playback automatically");
+        assert.notStrictEqual(state, "PLAYING");
         assert(window.document.querySelector(".synopsis"), "Foreground recovery must restore fresh details");
         window.localStorage.removeItem("vemm-tizen-dev-mode");
         window.localStorage.removeItem("vemm-tizen-error-log");
@@ -1154,52 +1160,46 @@ async function run() {
         assert(window.localStorage.getItem("vemm-tizen-preferences"));
         assert.strictEqual(window.localStorage.getItem("vemm-tizen-account"), null, "Preference changes must not persist account credentials");
 
-        // Resume kept focus for 0.6 s: the stream is negotiated and prepared at the resume point in the background,
-        // with nothing written to Plex; pressing Resume then only plays it.
+        // A details page negotiates and prepares its stream at the resume point in the background at once, with
+        // nothing written to Plex; pressing Resume then only plays it.
         function count(test) { return requests.filter(function (request) { return test.test(request.path); }).length; }
         function natives(name) { return nativeCalls.filter(function (call) { return call === name; }).length; }
-        function preloadNow() {
-            var pending = Array.from(preloadTimers.values());
-            preloadTimers.clear();
-            pending.forEach(function (callback) { callback(); });
-        }
         var resumeButton = Array.from(window.document.querySelectorAll("button")).find(function (node) { return node.textContent === "Resume"; });
         assert.strictEqual(window.document.activeElement, resumeButton, "The details page focuses Resume");
+        await settle();
         var before = { decisions: count(/decision$/), writes: count(/^\/:\/timeline|playQueues|scrobble/), timelines: count(/^\/:\/timeline/),
             opens: natives("open"), plays: natives("play") };
-        assert.strictEqual(preloadTimers.size, 1, "Focus arms one background start");
-        preloadNow(); await settle();
-        assert.strictEqual(count(/decision$/), before.decisions + 1, "The background start asks PMS for the decision");
-        assert.strictEqual(natives("open"), before.opens + 1, "and opens AVPlay");
+        assert.strictEqual(preloadTimers.size, 0, "A details page has no 0.6 s wait");
+        assert(before.decisions > 0, "The background start asks PMS for the decision");
         assert(nativeCalls.indexOf("PREBUFFER_MODE=25000") !== -1, "prepared at the resume point");
         assert.strictEqual(state, "READY", "It waits, prepared, without playing");
-        assert.strictEqual(natives("play"), before.plays);
         assert.strictEqual(count(/^\/:\/timeline|playQueues|scrobble/), before.writes, "Hovering writes nothing to Plex");
         assert.strictEqual(window.document.body.className, "", "The details page stays on screen");
         click("Resume"); await settle();
         assert.strictEqual(state, "PLAYING", "Resume plays the prepared stream");
-        assert.strictEqual(count(/decision$/), before.decisions + 1, "with no second decision");
-        assert.strictEqual(natives("open"), before.opens + 1, "and no second open");
+        assert.strictEqual(count(/decision$/), before.decisions, "with no second decision");
+        assert.strictEqual(natives("open"), before.opens, "and no second open");
         assert(count(/^\/:\/timeline/) > before.timelines, "Progress is reported once it plays");
         click("More");
         click("Stop and return to details");
         await settle();
-        assert.strictEqual(state, "NONE");
-        // Moving away discards it: AVPlay closes and the server conversion is stopped, still with no write.
+        assert.strictEqual(state, "READY", "Back on the page, its start is prepared again");
+        // Moving on leaves it; leaving the page discards it: AVPlay closes and the server conversion is stopped, with no write.
         resumeButton = Array.from(window.document.querySelectorAll("button")).find(function (node) { return node.textContent === "Resume"; });
         assert.strictEqual(window.document.activeElement, resumeButton);
-        preloadNow(); await settle();
+        await settle();
         assert.strictEqual(state, "READY");
         before = { writes: count(/^\/:\/timeline|playQueues|scrobble/), stops: count(/transcode\/universal\/stop$/), closes: natives("close") };
         Array.from(window.document.querySelectorAll("button")).find(function (node) { return node.textContent === "Play from beginning"; }).focus();
         await settle();
-        assert.strictEqual(state, "NONE", "Leaving Resume closes the prepared player");
+        assert.strictEqual(state, "READY", "Focus leaving Resume keeps the prepared player");
+        assert.strictEqual(preloadTimers.size, 0);
+        window.document.dispatchEvent(new window.KeyboardEvent("keydown", { keyCode: 10009, bubbles: true })); await settle();
+        assert.strictEqual(state, "NONE", "Leaving the page closes it");
         assert.strictEqual(natives("close"), before.closes + 1);
         assert.strictEqual(count(/transcode\/universal\/stop$/), before.stops + 1, "and stops the conversion it began");
         assert.strictEqual(count(/^\/:\/timeline|playQueues|scrobble/), before.writes, "without any write");
-        assert.strictEqual(preloadTimers.size, 1, "The newly focused Play from beginning arms its own");
-        window.document.querySelector('[aria-label="More"]').focus();
-        assert.strictEqual(preloadTimers.size, 0, "and leaving it before 0.6 s cancels it");
+        window.document.querySelector(".media-card").click(); await settle();
         movie.type = "show";
         movie.OnDeck = { Metadata: onDeck };
         window.document.dispatchEvent(new window.KeyboardEvent("keydown", { keyCode: 10009, bubbles: true })); await settle();

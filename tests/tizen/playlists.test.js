@@ -96,7 +96,7 @@ async function run() {
         return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve({ MediaContainer: container }); } });
     };
     ["js/plex-api.js", "js/avplay.js", "js/playback.js", "js/subtitles.js", "js/preferences.js", "js/session.js", "js/recents.js",
-        "js/home-hero.js", "js/item-menu.js", "js/skip-markers.js", "js/account-preferences.js", "js/file-info.js", "js/search-ui.js",
+        "js/home-hero.js", "js/item-menu.js", "js/episodes.js", "js/skip-markers.js", "js/account-preferences.js", "js/track-menu.js", "js/file-info.js", "js/search-ui.js",
         "js/playlists.js", "js/queue.js", "js/preload.js", "js/i18n.js", "main.js"].forEach(function (file) {
         window.eval(fs.readFileSync(path.join(app, file), "utf8"));
     });

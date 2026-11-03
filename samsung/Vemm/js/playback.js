@@ -170,6 +170,15 @@
         return copied ? "directstream" : "transcode";
     }
 
+    // Whether PMS's decision goes back on a burn it was asked for. It burns the part's selected subtitle whatever the URL
+    // names, says what it will do per stream, and cannot burn into a copied picture. An answer listing no subtitle says nothing.
+    function burnRefused(part, tracks) {
+        var streams = part && part.Stream || [];
+        if (videoStream(streams).decision === "copy") { return true; }
+        var subtitle = streams.filter(function (stream) { return Number(stream.streamType) === 3; })[0];
+        return !!subtitle && (subtitle.decision !== "burn" || tracks.explicit && trackId(subtitle.id) !== tracks.subtitleId);
+    }
+
     function plan(item, options) {
         options = options || {};
         var mediaIndex = options.mediaIndex || 0;
@@ -252,6 +261,9 @@
             explanation: explanation(kind, !!direct, verdict, force && kind === "video", profile) };
     }
 
+    // How long a held start is played without asking PMS first (2 min; it was still fine after 150 s on a 2018 TV).
+    var HELD_SAFELY = 120000;
+
     function create(options) {
         var client = options.client;
         var adapter = options.adapter;
@@ -265,6 +277,7 @@
         var started = false;
         var starting = false;
         var stopping = false;
+        var preparedAt = 0;
         var closed = false;
         var allocated = false;
         var reportChain = Promise.resolve();
@@ -275,6 +288,7 @@
         var buffer = null;
         var prebuffer = true;
         var preparing = null;
+        var subtitleRefused = false;
 
         function report(state) {
             if (!started) { return Promise.resolve(); }
@@ -361,6 +375,7 @@
                     decision.Metadata[0].Media && decision.Metadata[0].Media[0];
                 var selectedPart = selectedMedia && selectedMedia.Part && selectedMedia.Part[0];
                 streamMedia = selectedMedia || null;
+                subtitleRefused = selection.query.subtitles === "burn" && burnRefused(selectedPart, selection.tracks);
                 if (selection.direct && !(selectedPart && selectedPart.decision === "directplay")) {
                     if (selection.force) { throw new Error("Plex would not send the original file. Direct Play is set to Force in Settings."); }
                     // PMS declined the original; register the capped HLS transcode with its own decision.
@@ -409,6 +424,13 @@
             }
             return Promise.resolve(selection.tracks.explicit ?
                 client.selectStreams(selection.part.id, selection.tracks.audioId, selection.tracks.subtitleId) : null)
+                .catch(function (error) {
+                    if (!settings.automaticTracks) { throw error; }
+                    // Nobody asked for these tracks just now, so a refusal must not cost the viewing: Plex's own choice plays.
+                    settings.audioId = undefined;
+                    settings.subtitleId = undefined;
+                    selection = plan(item, settings);
+                })
                 .then(function () { return negotiate(false); });
         }
         // A seek past what PMS has converted makes it restart its transcoder for the requested segment while AVPlay
@@ -434,11 +456,22 @@
                 return adapter.snapshot().position;
             });
         }
+        // A held start waits for as long as the viewer stays on the page, and PMS may end an idle conversion in that
+        // time. One held longer than HELD_SAFELY is looked up first; only a clear "no such session" counts as gone.
+        function stillConverting() {
+            if (selection.direct || Date.now() - preparedAt < HELD_SAFELY) { return Promise.resolve(true); }
+            return client.request("/transcode/sessions/" + encodeURIComponent(selection.session)).then(function () {
+                return true;
+            }, function (error) { return error.status !== 404; });
+        }
         // Plays what prepare() readied; if that was lost, opens the ordinary way.
         function playPrepared() {
-            if (closed || stopping) { throw new Error("Playback was cancelled."); }
-            try { adapter.play(); }
-            catch (error) { return openStream(); }
+            return stillConverting().then(function (alive) {
+                if (closed || stopping) { throw new Error("Playback was cancelled."); }
+                if (!alive) { return openStream(); }
+                try { adapter.play(); }
+                catch (error) { return openStream(); }
+            });
         }
         return {
             // A background start: the decision and the AVPlay prepare at the offset, held before the picture.
@@ -451,7 +484,7 @@
                             throw new Error("Only a default start can be prepared.");
                         }
                         return negotiate(true);
-                    });
+                    }).then(function () { preparedAt = Date.now(); });
                 }
                 return preparing || Promise.reject(new Error("This playback session has already started."));
             },
@@ -470,6 +503,7 @@
                             report(snapshot.state);
                         }
                     }, 10000);
+                    return { subtitleRefused: subtitleRefused };
                 }).catch(function (error) {
                     starting = false;
                     throw error;

@@ -112,6 +112,50 @@ async function run() {
     await settle();
     assert.strictEqual(preload.take("item:45000"), current, "A start still preparing is handed over; Play waits for it");
 
+    // A details page holds one start: at once, whatever has focus afterwards, for as long as the page stays.
+    var held = 0;
+    function holdStart() { held += 1; current = prepared("item:45000"); return current; }
+    preload.hold(holdStart);
+    assert.strictEqual(time.pending(600), 0, "A held start waits for nothing");
+    assert.strictEqual(time.pending(120000), 0, "and has no lifetime");
+    await settle();
+    assert.strictEqual(held, 1, "It begins at once");
+    var first = current;
+    preload.hold(holdStart);
+    await settle();
+    assert.strictEqual(held, 1, "Focusing the suggested item again changes nothing");
+    assert.strictEqual(first.discarded, 0);
+    time.pass(120000);
+    await settle();
+    assert.strictEqual(first.discarded, 0, "Time alone never discards it");
+    assert.strictEqual(preload.take("item:0"), null, "Pressing something else gets nothing");
+    assert.strictEqual(first.discarded, 1, "and discards it");
+    preload.hold(holdStart);
+    await settle();
+    var second = current;
+    assert.strictEqual(preload.take("item:45000"), second, "Pressing the suggested item uses it");
+    assert.strictEqual(second.discarded, 0);
+    preload.hold(holdStart);
+    await settle();
+    var third = current;
+    preload.cancel();
+    assert.strictEqual(third.discarded, 1, "Leaving the page discards it");
+    var failing2 = prepared("item:45000", Promise.reject(new Error("dropped")));
+    failing2.ready.catch(function () {});
+    preload.hold(function () { return failing2; });
+    await settle();
+    assert.strictEqual(failing2.discarded, 1, "A failed hold is discarded");
+    held = 0;
+    preload.hold(holdStart);
+    await settle();
+    assert.strictEqual(held, 1, "and focusing the item again prepares it again");
+    preload.cancel();
+    preload.arm(start);
+    assert.strictEqual(time.pending(600), 1, "A Home card still waits 0.6 s");
+    preload.hold(holdStart);
+    assert.strictEqual(time.pending(600), 0, "and a hold replaces what was armed");
+    preload.cancel();
+
     console.log("Tizen background playback start (preload) tests: passed");
 }
 run().catch(function (error) { console.error(error.stack || error); process.exitCode = 1; });

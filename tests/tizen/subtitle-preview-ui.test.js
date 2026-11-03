@@ -84,20 +84,20 @@ async function run() {
         assert.strictEqual(doc.activeElement, box());
         key(38);
         assert.strictEqual(doc.activeElement, Array.from(doc.querySelectorAll("#screen button")).pop(),
-            "Up from the first control wraps to Back");
+            "Up from the first control wraps to the last");
         key(40);
-        assert.strictEqual(doc.activeElement, box(), "Down from Back wraps to the toggle");
+        assert.strictEqual(doc.activeElement, box(), "Down from the last wraps to the toggle");
 
         click(/^Text size:/);
-        assert(preview(), "The preview stays on the choice page");
-        click(/^Large$/);
-        assert(on(), "The toggle is still on on return");
-        assert(preview().classList.contains("subtitle-size-large"), "Choosing a size updates the sample");
+        assert(on(), "The toggle stays on");
+        assert(preview().classList.contains("subtitle-size-large"), "One press steps the size and updates the sample");
+        assert(find(/^Text size: Large$/), "The row shows the new value in place");
         click(/^Text position:/);
-        click(/^high$/);
+        click(/^Text position:/);
+        assert(find(/^Text position: High$/));
         assert(preview().classList.contains("subtitle-position-high"));
         click(/^Text background:/);
-        click(/^On$/);
+        assert(find(/^Text background: On$/));
         assert(preview().classList.contains("subtitle-background-on"));
         assert.strictEqual(doc.querySelectorAll("#subtitle-preview").length, 1);
 
@@ -110,7 +110,7 @@ async function run() {
         assert.strictEqual(doc.querySelector(".settings-notes").hidden, false);
         box().click();
         assert(preview(), "It can be shown again");
-        click(/^Back$/);
+        key(10009);
         assert.strictEqual(preview(), null, "Leaving the page removes it");
         click(/^Text overlay appearance$/);
         assert.strictEqual(on(), false, "Re-entering starts off");

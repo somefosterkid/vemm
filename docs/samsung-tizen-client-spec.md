@@ -49,8 +49,17 @@ Watchlist/catalogue, guide/DVR subviews, photos, settings/diagnostics and confir
 restores the focused title by identity; empty searches do not query the server; Home's featured
 title obeys the same favourite-library filter as its shelves. The show primary action requests
 `includeOnDeck=1` and opens/resumes the server-selected episode, accepting either object or array
-`OnDeck.Metadata`; it never submits the show itself as a playable leaf. Without an on-deck episode,
-Seasons remains the navigation path.
+`OnDeck.Metadata`; it never submits the show itself as a playable leaf. That episode is also the
+show page's suggested one: its season's tab is selected and the cursor starts on it in the page's
+episode row. Without an on-deck episode (a finished show, or one watched out of order), the page
+picks from the watched state of the seasons and episodes it lists: the first after the furthest
+watched, or the first of all. An unwatched show never suggests its last episode.
+A details page prepares its suggested item's stream in the background from the moment Play or that
+episode has focus, and keeps it until it is pressed or the page is left; see `js/preload.js`.
+A details page draws at once from a remembered answer (kept in memory, forgotten on playback, marking
+or a change of server or profile) or the pressed card's list item, and fills in what the list item
+lacks when the server answers; a card the cursor rests on fetches its answer ahead. With nothing known
+it stays empty, and a server slower than a second shows a way back. Errors keep their Retry.
 The playback overlay uses a compact transport row and progress bar. Chapters, tracks, quality,
 playback information, music-queue controls and Stop live under More rather than covering the
 video in two rows of always-visible buttons. It hides after five seconds of uninterrupted play,
@@ -529,7 +538,7 @@ Each row compares source behaviour; Samsung evidence is host-only.
 | LG capability (source) | Samsung status |
 |---|---|
 | Person biography and catalogue credits (`discover.rs`) | Present: `personProfile`, `personCredits` |
-| Credit-to-local availability join (`person.rs` `guid_index`/`match_local` over `/library/people/{id}/media`, keyed by the GUID tail) | **Added:** `localCatalogueIndex`/`matchCredit`/`personLibraryIndex`. Held credits open the local item ("In this library"); others keep "Search libraries"; an unreadable or truncated index is reported, never shown as availability. `people.test.js` and `filmography-ui.test.js` (fails against the previous commit) |
+| Credit-to-local availability join (`person.rs` `guid_index`/`match_local` over `/library/people/{id}/media`, keyed by the GUID tail) | **Added:** `localCatalogueIndex`/`matchCredit` over the person's own title list. Held credits are in the On this server row and open the local item; others have a row per job and open a search; a title list that cannot be read is reported with Retry, never shown as availability. `people.test.js`, `filmography-ui.test.js` and `cast-page.test.js` |
 | Extras/trailers shelf, Play from beginning, Remove from Continue Watching, related items | Present |
 | Up Next via `/allLeaves` | Present (`nextEpisode`) |
 | Show hero uses the PMS-selected on-deck episode (`plex/library.rs::metadata`, `screens/detail/hero.rs`) | **Added:** `includeOnDeck=1`, object/array metadata handling and Play next episode/Resume/Restart actions tied to the episode's own ID. Regression exercises the episode lookup and 20000ms resume, not show playback. Season selection remains available; without an on-deck result, choose an episode from Seasons |

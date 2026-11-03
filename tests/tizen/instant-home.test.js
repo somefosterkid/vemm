@@ -136,7 +136,7 @@ function boot(storage, options) {
     if (timers) {
         window.requestAnimationFrame = function (callback) { timers.push({ callback: callback, delay: 0 }); return timers.length; };
     }
-    ["js/i18n.js", "js/preferences.js", "js/favorites.js", "js/item-menu.js", "js/recents.js"].forEach(function (file) {
+    ["js/i18n.js", "js/preferences.js", "js/favorites.js", "js/item-menu.js", "js/episodes.js", "js/recents.js"].forEach(function (file) {
         vm.runInNewContext(fs.readFileSync(require.resolve("../../samsung/Vemm/" + file), "utf8"), window);
     });
     vm.runInNewContext(fs.readFileSync(require.resolve("../../samsung/Vemm/main.js"), "utf8"), {

@@ -208,6 +208,6 @@ console.log("search keyboard, results link, partial matching, ranking and Movies
 // Search results page: one row of actor photos, no Genres section, no "Search complete." status.
 var page = fs.readFileSync(path.resolve(__dirname, "../../samsung/Vemm/main.js"), "utf8");
 var search = page.slice(page.indexOf("function openSearch("), page.indexOf("function openDetail("));
-assert(/arranged\.people\.slice\(0, 5\)/.test(search) && /"detail-person-photo"/.test(search), "search shows at most one row of actor photos");
+assert(/arranged\.people\.slice\(0, 5\)/.test(search) && /personCard\(row/.test(search), "search shows at most one row of actor photos");
 assert(!/"Genres"|"genre"\]/.test(search), "search has no Genres section");
 assert(search.indexOf("Search complete.") === -1, "search shows no completion status");

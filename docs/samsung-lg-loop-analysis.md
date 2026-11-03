@@ -72,8 +72,8 @@ cropped lettering in those fixtures is not a second product title or evidence ab
 - Account utilities are reachable at the top rather than below every shelf. Back closes that
   panel first. Existing profiles, server choice, settings and service routes remain available.
 - Detail secondary actions live behind More instead of a wall of pills. Back closes More first.
-  Read more/Read less exposes the full synopsis; watch-state changes retain confirmation.
-- Choosing a season opens its episodes directly, without an intervening season detail dead end.
+  Read more, on the Play row, opens the full synopsis in a modal; watch-state changes retain confirmation.
+- A show's page lists the episodes of its seasons directly; choosing a season from anywhere opens that page on it.
   Episode browsing retains episode identity, progress and stills; Home prefers series posters.
 - The player retains its compact transport/progress system and five-second playing auto-hide.
   Seek controls expose the configured skip interval. Back from a submenu returns to Playback

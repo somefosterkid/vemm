@@ -36,7 +36,19 @@ Node.prototype.querySelectorAll = function () {
     this.children.forEach(walk);
     return found;
 };
-Node.prototype.querySelector = function () { return this.querySelectorAll()[0] || null; };
+// A stand-in for the few class lookups this journey reaches.
+Node.prototype.querySelector = function (selector) {
+    if (selector.charAt(0) === ".") { return null; }
+    return this.querySelectorAll()[0] || null;
+};
+Node.prototype.contains = function (other) {
+    return other === this || this.children.some(function (child) { return child.contains(other); });
+};
+Node.prototype.insertBefore = function (child, before) {
+    child.parentNode = this;
+    this.children.splice(this.children.indexOf(before), 0, child);
+    return child;
+};
 
 async function run() {
     var screen = new Node("main");
@@ -48,7 +60,7 @@ async function run() {
         parentRatingKey: "132", leafCount: 2, viewedLeafCount: 0 };
     var seasonTwo = { ratingKey: "134", type: "season", title: "Season 2", parentTitle: "Synthetic Show",
         parentRatingKey: "132", leafCount: 1, viewedLeafCount: 0 };
-    var episode = { ratingKey: "140", type: "episode", title: "Synthetic Episode", parentRatingKey: "133" };
+    var episode = { ratingKey: "140", type: "episode", title: "Synthetic Episode", parentRatingKey: "133", grandparentRatingKey: "132" };
     var showMetadataRequests = [];
     var childRequests = [];
     function forbiddenWrite() { assert.fail("Browsing must not write Plex watch or playback state"); }
@@ -100,6 +112,7 @@ async function run() {
         set activeElement(value) { focused = value; },
         getElementById: function (id) { return id === "screen" ? screen : status; },
         createElement: function (tag) { return new Node(tag); },
+        createDocumentFragment: function () { return new Node("fragment"); },
         querySelector: function () { return null; },
         addEventListener: function (name, callback) { listeners[name] = callback; }
     };
@@ -107,6 +120,7 @@ async function run() {
     var window = {
         PlexApi: api,
         VemmHomeHero: require("../../samsung/Vemm/js/home-hero.js"),
+        VemmEpisodes: require("../../samsung/Vemm/js/episodes.js"),
         Promise: Promise,
         URL: URL,
         Blob: Blob,
@@ -151,20 +165,13 @@ async function run() {
     assert(homeSeason, "Home renders the synthetic season card");
     homeSeason.events.click();
     await settle();
-    assert.strictEqual(childRequests[0], season.ratingKey, "Home season card opens its episode list");
-    assert(findContaining("Synthetic Episode"), "The season episode list is visible; status=" + status.textContent +
+    assert.deepStrictEqual(showMetadataRequests, [show.ratingKey], "A Home season card opens its show's page directly");
+    assert.strictEqual(childRequests[0], season.ratingKey, "with that season's episodes");
+    assert(findContaining("Synthetic Episode"), "The season's episodes are visible; status=" + status.textContent +
         ", buttons=" + JSON.stringify(screen.querySelectorAll().map(function (node) { return node.textContent; })));
-    assert(find("Go to show"), "The season episode list provides a route to its parent show");
-
-    click("Go to show");
-    await settle();
-    assert.strictEqual(showMetadataRequests[0], show.ratingKey, "Go to show opens the parent show's detail");
-    assert(find("Seasons"), "The parent show exposes its existing Seasons action");
-    click("Seasons");
-    await settle();
-    assert.strictEqual(childRequests[1], show.ratingKey, "The show's Seasons action loads its seasons");
-    assert(findContaining("Synthetic Show · Season 1"), "The first season is reachable from the show");
-    assert(findContaining("Synthetic Show · Season 2"), "Other seasons are reachable from the show");
+    assert(childRequests.indexOf(show.ratingKey) !== -1, "The page loads the show's seasons");
+    assert(find("Season 1"), "The first season is reachable from the show");
+    assert(find("Season 2"), "Other seasons are reachable from the show");
     console.log("Tizen Home season-to-show navigation: passed");
 }
 run().catch(function (error) { console.error(error); process.exitCode = 1; });

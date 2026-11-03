@@ -42,7 +42,7 @@ Node.prototype.querySelectorAll = function () {
     this.children.forEach(visit);
     return result;
 };
-Node.prototype.querySelector = function () { return this.querySelectorAll()[0] || null; };
+Node.prototype.querySelector = function (selector) { return /^(button|input)/.test(selector) ? this.querySelectorAll()[0] || null : null; };
 function findById(node, id) {
     if (node.id === id) { return node; }
     for (var i = 0; i < node.children.length; i += 1) {
@@ -116,7 +116,7 @@ function boot(storage, options) {
     var window = { PlexApi: api, VemmHomeHero: require("../../samsung/Vemm/js/home-hero.js"), Promise: Promise, URL: URL, Blob: Blob,
         localStorage: storage, fetch: function () { assert.fail("The synthetic UI must not use the network"); },
         addEventListener: function (name, callback) { listeners[name] = callback; } };
-    ["js/i18n.js", "js/preferences.js", "js/session.js", "js/favorites.js", "js/item-menu.js", "js/recents.js",
+    ["js/i18n.js", "js/preferences.js", "js/session.js", "js/favorites.js", "js/item-menu.js", "js/episodes.js", "js/recents.js",
         "js/dev-mode.js", "js/home-rows.js"].forEach(function (file) {
         vm.runInNewContext(fs.readFileSync(require.resolve("../../samsung/Vemm/" + file), "utf8"), window);
     });
@@ -204,7 +204,7 @@ async function settingsHomeRows() {
     assert.strictEqual(JSON.parse(storage.getItem("vemm-tizen-preferences")).autoOpenProfile, false);
     app.click("Home rows");
     await app.settle();
-    assert.deepStrictEqual(app.labels().slice(0, 6), ["Reorder: Off", "Show all rows and reset order", "Alpha Shelf", "Beta Shelf", "Gamma Shelf", "Back"]);
+    assert.deepStrictEqual(app.labels().slice(0, 6), ["Reorder: Off", "Show all rows and reset order", "Alpha Shelf", "Beta Shelf", "Gamma Shelf"]);
     app.click("Beta Shelf");
     assert.deepStrictEqual(JSON.parse(storage.getItem(ROWS_KEY)).hidden, ["synthetic.beta"], "Enter hides a row");
     app.click("Reorder: Off");
@@ -243,14 +243,14 @@ async function developerModeAndErrorLog() {
     assert.strictEqual(logged.length, 1);
     assert(logged[0].message.indexOf("SECRETVALUE") === -1 && logged[0].message.indexOf("[redacted]") !== -1, "Tokens are redacted: " + logged[0].message);
     app.click("Back");
-    app.click("Back");
+    app.key(10009);
     app.click("Developer");
     app.click("Error log");
     assert(app.labels().some(function (label) { return /boom https:\/\/a\.invalid\/x\?X-Plex-Token=\[redacted\]/.test(label); }), "The log lists the entry");
     app.click("Clear log");
     assert.strictEqual(storage.getItem("vemm-tizen-error-log"), null);
     assert(/No errors recorded/.test(app.status.textContent));
-    app.click("Back");
+    app.key(10009);
     app.click("Turn off developer mode");
     assert.strictEqual(storage.getItem("vemm-tizen-dev-mode"), null);
     assert(!app.find("Developer"), "Turning it off hides the section again");

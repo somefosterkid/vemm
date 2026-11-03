@@ -32,6 +32,13 @@ preferences, favorite-library choices and recent searches. Storage errors are
 reported; if saved sign-in cannot be removed, the app directs the user to clear
 its data on the TV.
 
+**Live TV** (optional) keeps one playlist link, which often contains a username
+and password, and the name of the last channel watched, in the same unencrypted
+storage. The TV contacts that provider directly to read the playlist, its logos
+and its channels, over plain http if the link says so. The link and channel
+addresses are never sent to Plex or shown in messages, Stats or the error log;
+Settings can remove the link, and **Reset preferences** removes it too.
+
 Downloaded artwork uses bounded requests, decoded images and temporary Blob
 URLs. The optional graphics backend adds bounded in-memory WebGL textures,
 released on view/image/lifecycle changes. It does not upload artwork or device

@@ -168,6 +168,7 @@ async function run() {
         assert.strictEqual(window.document.querySelectorAll(".media-card").length, 1);
         window.document.querySelector(".media-card").click(); await settle();
         assert(window.document.body.textContent.includes("Local counterpart"));
+        click("More");
         click("Add to Watchlist"); await settle();
         assert.strictEqual(calls.filter(function (call) { return call.path === "/actions/addToWatchlist"; }).length, 0);
         click("Confirm"); await settle();
@@ -185,7 +186,7 @@ async function run() {
         assert.strictEqual(state, "PLAYING");
         assert(window.document.body.textContent.includes("Track 1"));
         click("More");
-        click("Shuffle / On or off"); click("Repeat / Off, one, all");
+        click("Shuffle: Off"); click("Repeat: Off");
         listener.onstreamcompleted(); await settle();
         assert(window.document.body.textContent.includes("Track 1"), "Repeat-one must replay the same track");
         click("More");

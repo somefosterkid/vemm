@@ -40,7 +40,7 @@ Node.prototype.querySelectorAll = function () {
 
 // Regression: Back from a detail child listing must return focus to the action that opened it.
 // openDetail's loading placeholder used to consume the pending restore, so the rendered detail
-// page fell back to its first control (Read more) instead of Seasons.
+// page fell back to its first control instead of the one that opened the listing (here Albums).
 async function run() {
     var screen = new Node("main");
     var status = new Node("p");
@@ -51,8 +51,8 @@ async function run() {
         addEventListener: function () {}
     };
     Object.defineProperty(document, "activeElement", { get: function () { return focused; } });
-    var show = { ratingKey: "132", type: "show", title: "Synthetic Show", summary: "Synthetic synopsis" };
-    var season = { ratingKey: "133", type: "season", title: "Season 1", parentRatingKey: "132" };
+    var show = { ratingKey: "132", type: "artist", title: "Synthetic Artist", summary: "Synthetic synopsis" };
+    var season = { ratingKey: "133", type: "album", title: "Album 1", parentRatingKey: "132" };
     var server = {
         cancelRequests: function () {},
         getSections: function () { return Promise.resolve([]); },
@@ -103,14 +103,14 @@ async function run() {
     card.focus();
     card.events.click();
     await settle();
-    assert(find("Read more"), "Show detail renders its synopsis expander first");
-    click("Seasons");
+    assert(find("Read more"), "The detail page has its synopsis button");
+    click("Albums");
     await settle();
-    assert(find("Back"), "Seasons listing rendered");
+    assert(find("Back"), "Albums listing rendered");
     click("Back");
     await settle();
-    assert(focused && focused.textContent === "Seasons",
-        "Back to show detail must restore focus to Seasons, not " + (focused && focused.textContent));
+    assert(focused && focused.textContent === "Albums",
+        "Back to the detail page must restore focus to Albums, not " + (focused && focused.textContent));
     console.log("Tizen detail back-focus restoration: passed");
 }
 run().catch(function (error) { console.error(error); process.exitCode = 1; });

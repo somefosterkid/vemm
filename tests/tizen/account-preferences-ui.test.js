@@ -65,6 +65,7 @@ function harness(seed) {
             node.focus();
             node.click();
         },
+        back: function () { dom.window.document.dispatchEvent(new dom.window.KeyboardEvent("keydown", { keyCode: 10009, bubbles: true })); },
         close: function () { dom.window.close(); }
     };
 }
@@ -137,7 +138,7 @@ async function run() {
     assert(warm.find(/^Preferred audio language: Original$/), "The refresh updates the page in place");
     assert(warm.find(/^Subtitles: When audio isn't in the subtitle language$/));
     assert.strictEqual(JSON.parse(warm.data["vemm-tizen-account-audio-synthetic-profile"]).subtitleMode, 1, "The cache follows the refresh");
-    warm.click(/^Back$/);
+    warm.back();
     await settle();
     warm.click(/^Privacy and data$/);
     await settle();

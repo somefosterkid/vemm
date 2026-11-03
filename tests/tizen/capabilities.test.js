@@ -162,7 +162,7 @@ function qualityLayoutJourney(uhdPanel, headings, labels) {
         w.eval(source);
         var menu = w.document.getElementById("player-menu");
         assert.deepStrictEqual(Array.from(menu.querySelectorAll(".group-title")).map(function (node) { return node.textContent; }),
-            headings, "Resolution headings, Original first");
+            headings, "Original stands alone; one heading over what the server converts to");
         assert(!menu.querySelector(".group-title button, .group-title[tabindex]"), "Headings are not focusable");
         var buttons = Array.from(menu.querySelectorAll("button")).map(function (node) { return node.textContent.replace(/^✓ /, ""); });
         assert.deepStrictEqual(buttons.slice(1, 1 + labels.length), labels, "Highest Mbps first within a resolution");
@@ -173,14 +173,14 @@ function qualityLayoutJourney(uhdPanel, headings, labels) {
             "Back goes up a level; the menu has no close or return buttons");
     } finally { dom.window.close(); }
 }
-qualityLayoutJourney(true, ["Original", "4K", "1440p", "1080p", "720p", "480p"], [
-    "2160p · 40 Mbps (converts)", "1440p · 25 Mbps (converts)", "1080p · 20 Mbps (converts)",
-    "1080p · 16 Mbps (converts)", "1080p · 12 Mbps (converts)", "1080p · 10 Mbps (converts)",
-    "1080p · 8 Mbps (converts)", "720p · 4 Mbps (converts)", "720p · 2 Mbps (converts)", "480p · 0.7 Mbps (converts)"]);
-qualityLayoutJourney(false, ["Original", "1080p", "720p", "480p"], [
-    "1080p · 20 Mbps (converts)", "1080p · 16 Mbps (converts)", "1080p · 12 Mbps (converts)",
-    "1080p · 10 Mbps (converts)", "1080p · 8 Mbps (converts)", "720p · 4 Mbps (converts)",
-    "720p · 2 Mbps (converts)", "480p · 0.7 Mbps (converts)"]);
+qualityLayoutJourney(true, ["Converted by the server"], [
+    "2160p · 40 Mbps", "1440p · 25 Mbps", "1080p · 20 Mbps",
+    "1080p · 16 Mbps", "1080p · 12 Mbps", "1080p · 10 Mbps",
+    "1080p · 8 Mbps", "720p · 4 Mbps", "720p · 2 Mbps", "480p · 0.7 Mbps"]);
+qualityLayoutJourney(false, ["Converted by the server"], [
+    "1080p · 20 Mbps", "1080p · 16 Mbps", "1080p · 12 Mbps",
+    "1080p · 10 Mbps", "1080p · 8 Mbps", "720p · 4 Mbps",
+    "720p · 2 Mbps", "480p · 0.7 Mbps"]);
 // The in-player picker's top choice is the file's own size at what is asked for; it hides presets above
 // the file's size or at or above that bitrate, and a saved quality at or above it is the top choice.
 function qualitySourceJourney(bitrate, active, expected, top, pressedLabel) {
@@ -203,7 +203,7 @@ function qualitySourceJourney(bitrate, active, expected, top, pressedLabel) {
             'openQuality(); }());';
         w.eval(source);
         var buttons = Array.from(w.document.querySelectorAll("#player-menu button"));
-        var labels = buttons.map(function (node) { return node.textContent; }).filter(function (text) { return /converts[)]$/.test(text); });
+        var labels = buttons.slice(1).map(function (node) { return node.textContent; });
         assert.deepStrictEqual(labels, expected);
         assert.strictEqual(buttons[0].textContent, top, "The top choice names what is asked for (" + bitrate + ")");
         var pressed = w.document.querySelector('#player-menu [aria-pressed="true"]');
@@ -211,13 +211,13 @@ function qualitySourceJourney(bitrate, active, expected, top, pressedLabel) {
             "A saved quality at or above this file's top is the top choice");
     } finally { dom.window.close(); }
 }
-var below1080p = ["720p · 4 Mbps (converts)", "720p · 2 Mbps (converts)", "480p · 0.7 Mbps (converts)"];
+var below1080p = ["720p · 4 Mbps", "720p · 2 Mbps", "480p · 0.7 Mbps"];
 // An 8.1 Mbps 1080p episode with the saved quality 1080p 20 Mbps.
-qualitySourceJourney(8109, "1080h", ["1080p · 8 Mbps (converts)"].concat(below1080p), "1080p – 8.1 Mbps");
+qualitySourceJourney(8109, "1080h", ["1080p · 8 Mbps"].concat(below1080p), "1080p – 8.1 Mbps");
 qualitySourceJourney(8000, "original", below1080p, "1080p – 8 Mbps");
 qualitySourceJourney(8000, "2160", below1080p, "1080p – 8 Mbps");
 // A 2.1 Mbps 1080p film that plays directly: nothing at or above its own 2.1 Mbps is offered.
-qualitySourceJourney(2051, "720l", ["720p · 2 Mbps (converts)", "480p · 0.7 Mbps (converts)"], "1080p – 2.1 Mbps", "720p · 2 Mbps (converts)");
-qualitySourceJourney(0, "original", ["1080p · 20 Mbps (converts)", "1080p · 16 Mbps (converts)", "1080p · 12 Mbps (converts)",
-    "1080p · 10 Mbps (converts)", "1080p · 8 Mbps (converts)"].concat(below1080p), "Original quality");
+qualitySourceJourney(2051, "720l", ["720p · 2 Mbps", "480p · 0.7 Mbps"], "1080p – 2.1 Mbps", "720p · 2 Mbps");
+qualitySourceJourney(0, "original", ["1080p · 20 Mbps", "1080p · 16 Mbps", "1080p · 12 Mbps",
+    "1080p · 10 Mbps", "1080p · 8 Mbps"].concat(below1080p), "Original quality");
 console.log("Tizen quality picker layout and panel gating: passed");

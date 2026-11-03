@@ -99,12 +99,14 @@
         body.appendChild(keys);
         node.appendChild(body);
 
+        // options.max and options.tail are for long entries (a link): the display keeps the last tail characters in view.
+        var max = options.max || 200;
         function show() {
-            text.textContent = value;
+            text.textContent = options.tail && value.length > options.tail ? "…" + value.slice(-options.tail) : value;
             hint.hidden = value !== "";
         }
         function change(next) {
-            value = next.slice(0, 200);
+            value = next.slice(0, max);
             show();
             if (options.onChange) { options.onChange(value); }
         }
@@ -122,14 +124,29 @@
             grid.push(row.keys);
             return row;
         }
-        ROWS.forEach(function (letters) {
+        var typedKeys = [];
+        (options.rows || ROWS).forEach(function (letters) {
             var row = line();
             letters.split("").forEach(function (letter) {
-                key(row, letter, function () { change(value + letter); });
+                var control = key(row, letter, function () { change(value + control.textContent); });
+                typedKeys.push(control);
             });
         });
         var actions = line();
-        key(actions, options.translate("Space"), function () { if (value && value.slice(-1) !== " ") { change(value + " "); } }, "keyboard-wide");
+        // options.upper adds a key that switches the letters between lower and upper case.
+        if (options.upper) {
+            var capitals = false;
+            var shift = key(actions, "Aa", function () {
+                capitals = !capitals;
+                shift.setAttribute("aria-pressed", String(capitals));
+                typedKeys.forEach(function (control) {
+                    control.textContent = capitals ? control.textContent.toUpperCase() : control.textContent.toLowerCase();
+                });
+            }, "keyboard-wide");
+            shift.setAttribute("aria-pressed", "false");
+        } else {
+            key(actions, options.translate("Space"), function () { if (value && value.slice(-1) !== " ") { change(value + " "); } }, "keyboard-wide");
+        }
         key(actions, options.translate("Delete"), function () { change(value.slice(0, -1)); }, "keyboard-action");
         key(actions, options.translate("Clear"), function () { change(""); }, "keyboard-action");
         var filters = { node: filterRow, keys: [] };
@@ -169,6 +186,7 @@
             if (event.ctrlKey || event.altKey || event.metaKey || (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA"))) { return; }
             var character = code >= 48 && code <= 57 ? String(code - 48) : code >= 96 && code <= 105 ? String(code - 96) :
                 code >= 65 && code <= 90 ? String.fromCharCode(code) : "";
+            if (options.upper && event.key && event.key.length === 1) { character = event.key; }
             if (code === 8) { change(value.slice(0, -1)); } else if (character) { change(value + character); } else { return; }
             event.preventDefault();
             event.stopPropagation();
@@ -176,7 +194,7 @@
         root.document.addEventListener("keydown", typed, true);
 
         instance.value = function () { return value; };
-        instance.set = function (next) { value = String(next || "").slice(0, 200); show(); };
+        instance.set = function (next) { value = String(next || "").slice(0, max); show(); };
         instance.focus = function () {
             var target = instance.last && instance.last.parentNode ? instance.last : grid[0][0];
             node.classList.remove("keyboard-collapsed");

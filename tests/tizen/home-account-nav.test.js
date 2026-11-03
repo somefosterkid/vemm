@@ -53,7 +53,10 @@ function boot(options) {
     var client = {
         cancelRequests: function () {},
         getSections: function () { return Promise.resolve([{ key: "1", type: "movie", title: "Movies" }]); },
-        getHomeHubs: function () { return Promise.resolve([hub("First shelf", "a"), hub("Second shelf", "b")]); }
+        getHomeHubs: function () { return Promise.resolve([hub("First shelf", "a"), hub("Second shelf", "b")]); },
+        getPlaylists: function () {
+            return options.hangPlaylists ? new Promise(function () {}) : Promise.resolve({ Metadata: options.playlists || [] });
+        }
     };
     window.PlexApi.createAccountClient = function () {
         return {
@@ -237,11 +240,90 @@ async function menuWraps() {
     t.window.close();
 }
 
+// Search is a round button opposite the account button, reached by Right from the end of the tabs.
+async function searchButton() {
+    var t = boot();
+    await t.settle();
+    t.button("Sam").click();
+    await t.settle();
+    var nav = t.document.querySelector(".home-navigation");
+    var search = t.document.querySelector(".browse-header > .search-control");
+    assert(search && search.textContent === "Search", "The header has its own Search button");
+    assert(!Array.from(nav.querySelectorAll("button")).some(function (node) { return node.textContent === "Search"; }),
+        "Search is no longer one of the tabs");
+    assert(ruleBodies(".browse-header .search-control").some(function (body) {
+        return /position:\s*absolute/.test(body) && /right:\s*5vw/.test(body);
+    }), "It sits opposite the account button");
+    assert(/\.browse-header \.search-control:focus/.test(css), "It shows focus like the account button");
+
+    var tabs = nav.querySelectorAll("button");
+    var last = tabs[tabs.length - 1];
+    last.focus();
+    t.press(39);
+    assert.strictEqual(t.document.activeElement, search, "Right from the last tab goes to Search");
+    t.press(39);
+    assert.strictEqual(t.document.activeElement, search, "Right on Search does nothing");
+    t.press(38);
+    assert.strictEqual(t.document.activeElement, search, "Up on Search does nothing");
+    t.press(37);
+    assert.strictEqual(t.document.activeElement, last, "Left returns to the last tab");
+    search.focus();
+    t.press(40);
+    assert.notStrictEqual(t.document.activeElement, search, "Down leaves the header");
+    assert(!t.document.querySelector(".browse-header").contains(t.document.activeElement), "...for the page below");
+    t.window.close();
+}
+
+// The Playlists tab shows only when the profile has playlists, and the last answer draws without waiting.
+async function playlistsTab() {
+    function tab(t) {
+        return Array.from(t.document.querySelectorAll(".home-navigation button")).filter(function (node) {
+            return node.textContent === "Playlists";
+        })[0];
+    }
+    var t = boot({ playlists: [] });
+    await t.settle();
+    t.button("Sam").click();
+    await t.settle();
+    assert(!tab(t), "No playlists, no tab");
+    t.window.close();
+
+    t = boot({ playlists: [{ ratingKey: "9", type: "playlist", title: "Synthetic" }] });
+    await t.settle();
+    t.button("Sam").click();
+    await t.settle();
+    assert(tab(t), "The tab appears once the server has answered");
+    var names = Array.from(t.document.querySelectorAll(".home-navigation button")).map(function (node) { return node.textContent; });
+    assert.deepStrictEqual(names, ["Home", "Movies", "Playlists"], "...after the libraries");
+    var saved = {};
+    Object.keys(t.window.localStorage).forEach(function (key) {
+        if (/-playlists$/.test(key)) { saved[key] = t.window.localStorage.getItem(key); }
+    });
+    assert.strictEqual(Object.keys(saved).length, 1, "The answer is remembered for this profile and server");
+    t.window.close();
+
+    t = boot({ hangPlaylists: true, storage: saved });
+    await t.settle();
+    t.button("Sam").click();
+    await t.settle();
+    assert(tab(t), "A remembered answer draws the tab without waiting for the server");
+    t.window.close();
+
+    t = boot({ playlists: [], storage: saved });
+    await t.settle();
+    t.button("Sam").click();
+    await t.settle();
+    assert(!tab(t), "The tab goes when the last playlist has gone");
+    t.window.close();
+}
+
 (async function () {
     await accountButton();
     await navigation();
     await horizontalKeepsRows();
     titleRules();
     await menuWraps();
+    await searchButton();
+    await playlistsTab();
     console.log("Tizen Home account/navigation tests: passed");
 }()).catch(function (error) { console.error(error); process.exitCode = 1; });

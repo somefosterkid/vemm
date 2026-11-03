@@ -38,6 +38,9 @@ async function run() {
     assert.strictEqual(favorites.load(storage, "machine-a"), null);
 
     assert.deepStrictEqual(menu.rows({ type: "movie" }), [], "No row without a rating key");
+    var listed = { ratingKey: "5", type: "episode", grandparentRatingKey: "3", parentRatingKey: "4", viewOffset: 9 };
+    assert.deepStrictEqual(ids(menu.rows(listed, { listed: true })), ["play", "details", "watched", "unwatched", "start"],
+        "A card in a show's own episode list plays on OK, so it offers its details; it needs no way to its own show");
     assert.deepStrictEqual(ids(menu.rows({ ratingKey: "1", type: "movie" })), ["play", "watched"]);
     assert.deepStrictEqual(ids(menu.rows({ ratingKey: "1", type: "movie", viewCount: 1 })), ["play", "unwatched"]);
     var resumed = { ratingKey: "5", type: "episode", viewOffset: 9000, grandparentRatingKey: "3", parentRatingKey: "4" };

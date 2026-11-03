@@ -39,7 +39,78 @@ function rig() {
     };
     return { calls: calls, adapter: adapter, client: client };
 }
+// PMS burns the part's selected subtitle whatever the URL names and says so in the decision. An answer that it will
+// not, after the viewer asked, must reach the player instead of ending in silently missing text.
+async function burnAnswers() {
+    var subbed = { ratingKey: "10", duration: 100000, Media: [{ container: "mkv", videoCodec: "h264", audioCodec: "aac", width: 1920, height: 1080,
+        Part: [{ id: "20", key: "/library/parts/20/file.mkv", Stream: [{ id: 30, streamType: 1, codec: "h264" }, { id: 31, streamType: 2, selected: true },
+            { id: 41, streamType: 3, codec: "srt", selected: true }, { id: 42, streamType: 3, codec: "srt" }] }] }] };
+    function answer(streams) {
+        return { generalDecisionCode: 1001, Metadata: [{ Media: [{ bitrate: 7000, Part: [{ decision: "transcode", Stream: streams }] }] }] };
+    }
+    async function refused(settings, streams) {
+        var test = rig();
+        test.client.request = function () { return Promise.resolve(answer(streams)); };
+        var session = playback.create({ client: test.client, adapter: test.adapter, item: subbed, settings: settings });
+        var started = await session.start();
+        await session.stop();
+        return started.subtitleRefused;
+    }
+    var converted = { id: "30", streamType: 1, decision: "transcode" };
+    var burning = function (id) { return { id: String(id), streamType: 3, decision: "burn", burn: "1" }; };
+    assert.strictEqual(await refused({}, [converted, burning(41)]), false, "The default track burning is the normal answer");
+    assert.strictEqual(await refused({ audioId: 31, subtitleId: 42 }, [converted, burning(42)]), false, "So is the picked track burning");
+    assert.strictEqual(await refused({ audioId: 31, subtitleId: 42 }, [converted, { id: "42", streamType: 3, decision: "unavailable" }]), true,
+        "A track PMS cannot burn is reported");
+    assert.strictEqual(await refused({ audioId: 31, subtitleId: 42 }, [converted, burning(41)]), true,
+        "So is PMS burning another track than the one picked");
+    assert.strictEqual(await refused({}, [converted, burning(42)]), false,
+        "A default start follows the server, which may have moved on from this copy of the item");
+    assert.strictEqual(await refused({}, [{ id: "30", streamType: 1, decision: "copy" }, burning(41)]), true,
+        "A copied picture cannot carry burned text");
+    assert.strictEqual(await refused({}, [converted]), false, "An answer that lists no subtitle says nothing either way");
+    assert.strictEqual(await refused({ audioId: 31, subtitleId: 0 }, [converted, { id: "41", streamType: 3, decision: "ignore" }]), false,
+        "Subtitles off is not a refusal");
+    assert.strictEqual(await refused({ audioId: 31, subtitleId: 42, overlaySubtitle: true }, [converted, { id: "42", streamType: 3, decision: "ignore" }]), false,
+        "Nor is text the app draws itself");
+    // A background start has nobody watching yet: the answer waits for the start the viewer sees.
+    var test = rig();
+    test.client.request = function () { return Promise.resolve(answer([converted, { id: "41", streamType: 3, decision: "unavailable" }])); };
+    test.adapter.play = function () {};
+    var prepared = playback.create({ client: test.client, adapter: test.adapter, item: subbed });
+    await prepared.prepare();
+    assert.strictEqual((await prepared.start()).subtitleRefused, true);
+    await prepared.stop();
+}
+// Tracks applied by themselves (the swap, a remembered pick) must not cost the viewing: if Plex refuses the write, its own
+// choice plays and the session says so. A pick made in the menu still stops on a refusal.
+async function automaticTracksGiveWay() {
+    var subbed = { ratingKey: "10", duration: 100000, Media: [{ container: "mkv", videoCodec: "h264", audioCodec: "aac", width: 1920, height: 1080,
+        Part: [{ id: "20", key: "/library/parts/20/file.mkv", Stream: [{ id: 30, streamType: 1, codec: "h264" }, { id: 31, streamType: 2, selected: true },
+            { id: 41, streamType: 3, codec: "srt", selected: true }, { id: 42, streamType: 3, codec: "srt" }] }] }] };
+    function refusing() {
+        var test = rig();
+        test.client.selectStreams = function () { var error = new Error("PMS request failed with HTTP 403."); error.status = 403; return Promise.reject(error); };
+        return test;
+    }
+    var soft = refusing();
+    var settings = { audioId: 31, subtitleId: 42, automaticTracks: true };
+    var session = playback.create({ client: soft.client, adapter: soft.adapter, item: subbed, settings: settings });
+    var started = await session.start();
+    assert.strictEqual(started.subtitleRefused, false);
+    assert.deepStrictEqual(session.selection(), { audioId: 31, subtitleId: 41, explicit: false }, "The selection says what is really playing");
+    var asked = soft.calls.filter(function (call) { return call[0] === "decision"; }).pop()[1];
+    assert.strictEqual(asked.subtitleStreamID, 41);
+    assert.strictEqual(settings.subtitleId, undefined, "A retry of this start asks afresh");
+    await session.stop();
+    var strict = refusing();
+    var picked = playback.create({ client: strict.client, adapter: strict.adapter, item: subbed, settings: { audioId: 31, subtitleId: 42 } });
+    await assert.rejects(picked.start(), /HTTP 403/);
+    await picked.stop();
+}
 async function run() {
+    await automaticTracksGiveWay();
+    await burnAnswers();
     var plan = playback.plan(item, { offset: 5000 });
     assert.strictEqual(plan.direct, false, "Unknown capabilities must not guess direct play");
     assert.strictEqual(plan.query.directPlay, 0);
@@ -742,6 +813,36 @@ async function run() {
     assert.deepStrictEqual(test.kinds(), ["decision", "open", "close", "cleanup"],
         "A discarded background start ends its conversion and writes or reads back nothing");
     assert.strictEqual(discarded, undefined);
+    // A start held for minutes: PMS is asked first, and one whose conversion has gone opens the ordinary way.
+    var realNow = Date.now;
+    async function heldFor(ms, answer) {
+        var rigged = holdRig();
+        var decide = rigged.client.request;
+        rigged.client.request = function (path, method, query) {
+            if (/^\/transcode\/sessions\//.test(path)) { rigged.calls.push(["lookup", path]); return answer(); }
+            return decide(path, method, query);
+        };
+        var running = playback.create({ client: rigged.client, adapter: rigged.adapter, item: item, settings: { offset: 5000 } });
+        await running.prepare();
+        var at = realNow();
+        Date.now = function () { return at + ms; };
+        try { await running.start(); } finally { Date.now = realNow; }
+        await running.stop();
+        return rigged.kinds();
+    }
+    var goneError = new Error("PMS request failed with HTTP 404.");
+    goneError.status = 404;
+    var serverError = new Error("PMS request failed with HTTP 500.");
+    serverError.status = 500;
+    var kinds = await heldFor(60000, function () { return Promise.reject(goneError); });
+    assert.deepStrictEqual(kinds.slice(0, 3), ["decision", "open", "play"], "A short hold just plays, with no lookup");
+    kinds = await heldFor(600000, function () { return Promise.resolve({ TranscodeSession: [{ throttled: true }] }); });
+    assert.deepStrictEqual(kinds.slice(0, 4), ["decision", "open", "lookup", "play"], "A long hold whose conversion lives plays it");
+    kinds = await heldFor(600000, function () { return Promise.reject(serverError); });
+    assert.deepStrictEqual(kinds.slice(0, 4), ["decision", "open", "lookup", "play"], "No clear answer also plays it");
+    kinds = await heldFor(600000, function () { return Promise.reject(goneError); });
+    assert.deepStrictEqual(kinds.slice(0, 5), ["decision", "open", "lookup", "decision", "open"], "A conversion that has gone starts again");
+    assert.strictEqual(kinds.indexOf("play"), -1, "and the dead one is never played");
     for (var refused of [{ audioId: 31, subtitleId: 0 }, { paused: true }]) {
         test = holdRig();
         session = playback.create({ client: test.client, adapter: test.adapter, item: item, settings: Object.assign({ offset: 5000 }, refused) });

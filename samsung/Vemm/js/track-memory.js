@@ -16,7 +16,33 @@
         var code = stream && (stream.languageCode || stream.languageTag);
         return /^[A-Za-z]{2,3}(-[A-Za-z0-9]+)?$/.test(String(code || "")) ? String(code).toLowerCase() : "";
     }
-    function kind(stream) { return flag(stream.forced) ? "forced" : flag(stream.hearingImpaired) ? "sdh" : "regular"; }
+    // Plex flags forced and SDH tracks only sometimes; otherwise the title says. "forced" is any track that leaves the
+    // dialogue out, signs and songs or commentary too, so a pick of the full track never lands on one in another episode.
+    function kind(stream) {
+        var title = String(stream.title || "");
+        if (flag(stream.forced) || /\b(forced|signs?|songs?|sing-?along|commentary)\b/i.test(title) && !/\b(full|dialog(ue)?)\b/i.test(title)) {
+            return "forced";
+        }
+        return flag(stream.hearingImpaired) || /\b(sdh|cc)\b/i.test(title) ? "sdh" : "regular";
+    }
+    // A language's tracks as a viewer looks for them: all the dialogue first, keeping Plex's order within each kind.
+    function ordered(streams) {
+        return ["regular", "sdh", "forced"].reduce(function (list, wanted) {
+            return list.concat(streams.filter(function (stream) { return kind(stream) === wanted; }));
+        }, []);
+    }
+    // The track with all the dialogue in this one's language: a regular one, else SDH. null when there is none.
+    function fullTrack(partial, streams) {
+        var same = ofType(streams, 3).filter(function (stream) { return language(stream) === language(partial); });
+        function first(wanted) { return same.filter(function (stream) { return kind(stream) === wanted; })[0]; }
+        return first("regular") || first("sdh") || null;
+    }
+    function shortName(stream) { return stream.displayTitle || stream.language || stream.codec || String(stream.id); }
+    // A track's name in a menu: Plex's short title, or its long one where two tracks would read the same.
+    function label(stream, streams) {
+        var twin = streams.some(function (other) { return other !== stream && shortName(other) === shortName(stream); });
+        return twin && stream.extendedDisplayTitle || shortName(stream);
+    }
     function describe(stream) {
         var code = language(stream);
         return code ? (Number(stream.streamType) === 3 && kind(stream) !== "regular" ? code + ":" + kind(stream) : code) : "";
@@ -79,10 +105,12 @@
             var matchAudio = audios.filter(function (stream) { return language(stream) === entry.audio; })[0];
             if (matchAudio && Number(matchAudio.id) !== chosen.audioId) { chosen.audioId = Number(matchAudio.id); picked = true; }
         }
-        if (entry.subtitle === "off") {
+        // Moving the selection off a downloaded subtitle deletes it on the server (docs/pms-api.md section 8): only the viewer may.
+        var remembered = subtitle && subtitle.providerTitle ? "" : entry.subtitle;
+        if (remembered === "off") {
             if (chosen.subtitleId !== 0) { chosen.subtitleId = 0; picked = true; }
-        } else if (entry.subtitle) {
-            var wanted = entry.subtitle.split(":");
+        } else if (remembered && !(subtitle && describe(subtitle) === remembered)) {
+            var wanted = remembered.split(":");
             var same = subtitles.filter(function (stream) { return language(stream) === wanted[0]; });
             var match = same.filter(function (stream) { return kind(stream) === (wanted[1] || "regular"); })[0] ||
                 (wanted[1] === "sdh" ? same.filter(function (stream) { return kind(stream) === "regular"; })[0] : null);
@@ -91,5 +119,5 @@
         return picked && chosen.audioId > 0 ? chosen : null;
     }
 
-    return { recall: recall, remember: remember, forget: forget, choose: choose };
+    return { recall: recall, remember: remember, forget: forget, choose: choose, kind: kind, ordered: ordered, label: label, fullTrack: fullTrack };
 }));

@@ -129,9 +129,9 @@ async function run() {
     await settle();
     assert(denied.text().includes("Stay signed in on this TV: On"),
         "Saved sign-in controls must remain reachable when PMS is unavailable");
-    denied.click("Back");
+    denied.dom.window.document.dispatchEvent(new denied.dom.window.KeyboardEvent("keydown", { keyCode: 10009, bubbles: true }));
     await settle();
-    denied.click("Back");
+    denied.dom.window.document.dispatchEvent(new denied.dom.window.KeyboardEvent("keydown", { keyCode: 10009, bubbles: true }));
     await settle();
     assert(denied.text().includes("Choose a server"));
     denied.dom.window.close();

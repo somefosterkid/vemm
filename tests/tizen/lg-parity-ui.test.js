@@ -142,7 +142,7 @@ function boot(storage, extraHubs) {
     var window = { PlexApi: api, VemmHomeHero: require("../../samsung/Vemm/js/home-hero.js"), Promise: Promise, URL: URL, Blob: Blob, localStorage: storage,
         fetch: function () { assert.fail("The synthetic UI must not use the network"); },
         addEventListener: function () {} };
-    ["i18n.js", "js/preferences.js", "js/favorites.js", "js/item-menu.js"].forEach(function (file) {
+    ["i18n.js", "js/preferences.js", "js/favorites.js", "js/item-menu.js", "js/episodes.js"].forEach(function (file) {
         var path = require.resolve("../../samsung/Vemm/" + (file === "i18n.js" ? "js/i18n.js" : file));
         vm.runInNewContext(fs.readFileSync(path, "utf8"), window);
     });
@@ -187,7 +187,7 @@ async function onboardingSkip() {
     var app = boot(storage);
     await app.signIn("Alpha (owned)");
     assert(app.find("Start watching"), "First run on a server opens Favorite libraries");
-    assert(app.find("[x] Movies") && app.find("[x] Shows"), "Every library starts selected");
+    assert(app.find("Movies").attributes["aria-pressed"] === "true" && app.find("Shows").attributes["aria-pressed"] === "true", "Every library starts selected");
     assert.strictEqual(app.status.textContent, "Nothing is saved until you choose Start watching.");
     app.click("Skip for now");
     await app.settle();
@@ -199,10 +199,10 @@ async function onboardingSave() {
     var storage = memoryStorage();
     var app = boot(storage);
     await app.signIn("Alpha (owned)");
-    app.click("[x] Shows");
-    assert(app.find("[ ] Shows"));
-    app.click("[x] Movies");
-    assert(app.find("[x] Movies"), "The last library cannot be cleared");
+    app.click("Shows");
+    assert.strictEqual(app.find("Shows").attributes["aria-pressed"], "false");
+    app.click("Movies");
+    assert.strictEqual(app.find("Movies").attributes["aria-pressed"], "true", "The last library cannot be cleared");
     assert.strictEqual(app.status.textContent, "Keep at least one library.");
     app.click("Start watching");
     await app.settle();
@@ -228,7 +228,7 @@ async function holdMenuAndShortPress() {
     app.fire(600);
     var menu = app.document.getElementById("player-menu");
     assert(menu, "Holding OK opens the card menu");
-    var labels = menu.children.filter(function (node) { return node.tag === "button"; }).map(function (node) { return node.textContent; });
+    var labels = menu.querySelectorAll().map(function (node) { return node.textContent; });
     assert.strictEqual(labels[0], "Resume", "Play is the default row, never a write");
     assert(labels.indexOf("Remove from Continue Watching") !== -1);
     assert.strictEqual(labels[labels.length - 1], "Cancel");
@@ -255,6 +255,10 @@ async function otherServers() {
     var movieCard = app.cards().find(function (node) { return node.vemmCard.item.ratingKey === "7"; });
     movieCard.events.click();
     await app.settle();
+    // More places its list by measuring its button.
+    Node.prototype.style = {};
+    app.find("More").getBoundingClientRect = function () { return { left: 0, top: 0, right: 0, bottom: 0 }; };
+    app.click("More");
     app.click("Other servers");
     await app.settle();
     assert.deepStrictEqual(app.record.findGuid, ["Beta:5:" + movie.guid], "The current server is excluded");
